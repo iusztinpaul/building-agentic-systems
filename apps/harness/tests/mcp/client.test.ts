@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLogger, type Logger } from "../../src/log.ts";
+import type { LoginUi } from "../../src/mcp/auth.ts";
 import {
   connectMcpServers,
   INITIALIZE_TIMEOUT_MS,
@@ -15,6 +16,7 @@ import {
 } from "../../src/mcp/client.ts";
 import type { McpServer } from "../../src/mcp/config.ts";
 import { type FakeMcpHttp, startFakeMcpHttp } from "../helpers/mcp-http.ts";
+import { type FakeOAuth, startFakeOAuth } from "../helpers/oauth-http.ts";
 import { gone } from "../helpers/tmp.ts";
 
 const SERVER = fileURLToPath(new URL("../fixtures/fake-mcp-server.mjs", import.meta.url));
@@ -27,10 +29,13 @@ const clients: McpClient[] = [];
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "tree-agent-mcp-client-"));
   marker = join(dir, "pids");
+  // An HTTP client without `env` reads mcp-auth/ here, never in ~.
+  vi.stubEnv("TREE_AGENT_HOME", dir);
 });
 
 afterEach(async () => {
   vi.useRealTimers();
+  vi.unstubAllEnvs();
   // Kill every child even when an assertion failed.
   const pids = pidsOf(marker);
   await Promise.all(clients.splice(0).map((c) => c.close()));
@@ -333,6 +338,212 @@ describe("McpClient over streamable HTTP", () => {
     expect(again.structuredContent).toEqual({ n: 2 });
     const methods = http.requests.map((r) => r.body?.method);
     expect(methods.slice(-3)).toEqual(["initialize", "notifications/initialized", "tools/call"]);
+  });
+});
+
+describe("McpClient with an MCP login (the OAuth fake)", () => {
+  let oauth: FakeOAuth;
+  afterEach(async () => {
+    await oauth?.close();
+  });
+
+  const env = () => ({ TREE_AGENT_HOME: dir });
+  const locked = (headers: Record<string, string> = {}): McpServer => ({
+    url: oauth.url,
+    headers,
+    toolExposure: {},
+  });
+  const open = (): McpServer => ({ url: oauth.openUrl, headers: {}, toolExposure: {} });
+  const warns = (lines: string[]) => lines.filter((l) => l.includes("warn:"));
+  const initializes = () => oauth.mcp.filter((r) => r.body?.method === "initialize");
+  // A login UI whose browser completes after `delayMs`, then runs `after`.
+  function browser(delayMs = 0, after?: () => void): LoginUi & { lines: string[] } {
+    const lines: string[] = [];
+    return {
+      lines,
+      notify: (line) => lines.push(line),
+      open: (url) => {
+        void new Promise((r) => setTimeout(r, delayMs))
+          .then(() => oauth.browse(url))
+          .then(() => after?.());
+      },
+    };
+  }
+  async function until(ok: () => boolean): Promise<void> {
+    for (let i = 0; i < 2_000 && !ok(); i++) await new Promise((r) => setImmediate(r));
+    expect(ok()).toBe(true);
+  }
+
+  it("the login runs outside initialize's timer: a slower authorize step still connects, with two initializes", async () => {
+    oauth = await startFakeOAuth();
+    const login = browser(400);
+    const c = client(locked(), { env: env(), log: sink().log, initializeTimeoutMs: 200, login });
+
+    const tools = await c.listTools();
+
+    expect(tools.map((t) => t.name)).toEqual(["echo", "read_note"]);
+    expect(c.connected).toBe(true);
+    expect(initializes().map((r) => r.authorization)).toEqual([null, `Bearer ${oauth.issued[0]}`]);
+    expect(login.lines).toEqual([expect.stringMatching(/^mcp "fake": log in at http:\/\/127/)]);
+    expect(oauth.mcp.slice(1).every((r) => r.authorization === `Bearer ${oauth.issued[0]}`)).toBe(
+      true,
+    );
+  });
+
+  it("a later run reuses the token file: no URL, no second login", async () => {
+    oauth = await startFakeOAuth();
+    await client(locked(), { env: env(), log: sink().log, login: browser() }).listTools();
+    const later = browser();
+
+    await client(locked(), { env: env(), log: sink().log, login: later }).listTools();
+
+    expect(later.lines).toEqual([]);
+    expect(oauth.authorizations).toHaveLength(1);
+    expect(initializes()).toHaveLength(3);
+  });
+
+  it("headless (no login UI): exactly one warning naming --mcp-login, no registration, the client kept", async () => {
+    oauth = await startFakeOAuth();
+    const { log, lines } = sink();
+
+    const connected = await connectMcpServers(
+      { "tree-memory": locked(), other: open() },
+      { env: env(), log },
+    );
+    clients.push(...connected);
+
+    expect(warns(lines)).toEqual([
+      '[tree-agent] warn: mcp "tree-memory": needs a login; run tree-agent --mcp-login tree-memory once, then re-run\n',
+    ]);
+    expect(connected.map((c) => [c.name, c.connected])).toEqual([
+      ["tree-memory", false],
+      ["other", true],
+    ]);
+    expect(oauth.registrations).toEqual([]);
+    expect(oauth.wellKnown).toEqual([]);
+    await expect(connected[0]?.callTool("echo")).rejects.toThrow("needs a login");
+  });
+
+  it("is bounded at 5 min (fake timers): the exact warning at 300 000 ms, the other server usable", async () => {
+    oauth = await startFakeOAuth();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const { log, lines } = sink();
+    const shown: string[] = [];
+
+    const pending = connectMcpServers(
+      { locked: locked(), other: open() },
+      { env: env(), log, fetch: oauth.fetch, login: { notify: (l) => shown.push(l) } },
+    );
+    await until(() => shown.length === 1);
+    await vi.advanceTimersByTimeAsync(299_999);
+    const early = warns(lines);
+    await vi.advanceTimersByTimeAsync(1);
+    const connected = await pending;
+    clients.push(...connected);
+
+    expect(early).toEqual([]);
+    expect(warns(lines)).toEqual([
+      '[tree-agent] warn: mcp "locked": login timed out after 5 min; run tree-agent --mcp-login locked to log in\n',
+    ]);
+    expect(connected.map((c) => [c.name, c.connected])).toEqual([
+      ["locked", false],
+      ["other", true],
+    ]);
+    vi.useRealTimers();
+    const result = await connected[1]?.callTool("echo", { q: 1 });
+    expect(result?.structuredContent).toEqual({ q: 1 });
+    expect(
+      JSON.parse(readFileSync(join(dir, "mcp-auth", "locked.json"), "utf8")).tokens,
+    ).toBeNull();
+  });
+
+  it("a configured Authorization header: no discovery, no login, today's HTTP 401 warning", async () => {
+    oauth = await startFakeOAuth();
+    const { log, lines } = sink();
+    const login = browser();
+
+    const connected = await connectMcpServers(
+      { s: locked({ Authorization: "Bearer fmcp_x" }) },
+      { env: env(), log, login },
+    );
+    clients.push(...connected);
+
+    expect(warns(lines)).toEqual([
+      '[tree-agent] warn: mcp "s": HTTP 401: {"error":"invalid_request","error_description":"Bearer token required"}\n',
+    ]);
+    expect(oauth.wellKnown).toEqual([]);
+    expect(login.lines).toEqual([]);
+  });
+
+  it("a 401 after the login is one error, not a second login", async () => {
+    oauth = await startFakeOAuth();
+    const login = browser(0, () => oauth.rejectEveryToken());
+    const c = client(locked(), { env: env(), log: sink().log, login });
+
+    await expect(c.listTools()).rejects.toThrow(/^mcp "fake": HTTP 401: /);
+
+    expect(oauth.authorizations).toHaveLength(1);
+    expect(login.lines).toHaveLength(1);
+  });
+
+  it("a failed refresh mid-session fails that call; the next one logs in again (TTY)", async () => {
+    oauth = await startFakeOAuth();
+    const login = browser();
+    const c = client(locked(), { env: env(), log: sink().log, login });
+    await c.listTools();
+    oauth.expireAccessToken();
+    oauth.rejectRefresh();
+
+    await expect(c.callTool("echo", { n: 1 })).rejects.toThrow(
+      'mcp "fake": HTTP 401: needs a login',
+    );
+    expect(c.connected).toBe(false);
+    const again = await c.callTool("echo", { n: 2 });
+
+    expect(again.structuredContent).toEqual({ n: 2 });
+    expect(login.lines).toHaveLength(2);
+    expect(oauth.registrations).toHaveLength(1);
+  });
+
+  it("a failed refresh at startup without a TTY: the one skip warning, no second login", async () => {
+    oauth = await startFakeOAuth();
+    const first = await connectMcpServers(
+      { "tree-memory": locked() },
+      { env: env(), log: sink().log, login: browser() },
+    );
+    clients.push(...first);
+    expect(first[0]?.connected).toBe(true);
+    oauth.expireAccessToken();
+    oauth.rejectRefresh();
+    const { log, lines } = sink();
+
+    const connected = await connectMcpServers({ "tree-memory": locked() }, { env: env(), log });
+    clients.push(...connected);
+
+    expect(warns(lines)).toEqual([
+      '[tree-agent] warn: mcp "tree-memory": needs a login; run tree-agent --mcp-login tree-memory once, then re-run\n',
+    ]);
+    expect(oauth.tokenRequests.map((r) => r.grant_type)).toEqual([
+      "authorization_code",
+      "refresh_token",
+    ]);
+    expect(oauth.authorizations).toHaveLength(1);
+  });
+
+  it("close() ends a pending login wait", async () => {
+    oauth = await startFakeOAuth();
+    const shown: string[] = [];
+    const c = client(locked(), {
+      env: env(),
+      log: sink().log,
+      login: { notify: (l) => shown.push(l) },
+    });
+
+    const pending = c.listTools().catch((e: Error) => e.message);
+    await until(() => shown.length === 1);
+    await c.close();
+
+    expect(await pending).toBe('mcp "fake": login cancelled');
   });
 });
 

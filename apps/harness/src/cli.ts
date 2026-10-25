@@ -18,7 +18,14 @@ import {
 } from "./config/settings.ts";
 import { isTrusted, trustDirectory } from "./config/trust.ts";
 import { type Out, runHeadless, type Signals } from "./headless/print.ts";
-import { type McpClient, type StartMcp, startMcp } from "./mcp/client.ts";
+import { hasAuthorization, type LoginUi, openBrowser } from "./mcp/auth.ts";
+import {
+  authFilePath,
+  deleteAuthFile,
+  readAuthFile,
+} from "./mcp/auth-store.ts";
+import { McpClient, type StartMcp, startMcp } from "./mcp/client.ts";
+import { loadMcpConfig } from "./mcp/config.ts";
 import { type McpServerInfo, registerMcpTools } from "./mcp/register.ts";
 import { OpenRouterProvider } from "./provider/openrouter.ts";
 import type { Provider } from "./provider/types.ts";
@@ -41,7 +48,9 @@ flags: --help | -h (this text)
        --no-skills  --no-mcp (no mcp.json read, no server started)
        --permission-mode ask|auto (TUI: settings, ask; headless: auto)
        --on-blocked stop|continue (headless deny: exit 2, or go on)
-       --compact-at <ratio> (0.3–0.95; compact at ratio × context)`;
+       --compact-at <ratio> (0.3–0.95; compact at ratio × context)
+       --mcp-login <server> (OAuth login to an HTTP MCP server)
+       --mcp-logout <server> (delete its mcp-auth/ token file)`;
 
 export interface CliArgs {
   prompt: string;
@@ -59,9 +68,18 @@ export interface CliArgs {
   compactAt?: number; // settings.compaction.triggerRatio
 }
 
+// --mcp-login / --mcp-logout: no model key, no session.
+export interface McpAuthMode {
+  kind: "mcp-login" | "mcp-logout";
+  server: string;
+  cwd?: string;
+  trust: boolean;
+}
+
 export type Mode =
   | { kind: "headless"; args: CliArgs; from: "argv" | "stdin" }
   | { kind: "tui"; args: CliArgs }
+  | McpAuthMode
   | { kind: "help" }
   | { kind: "usage"; error?: string };
 
@@ -76,6 +94,9 @@ export interface CliDeps {
   stdout: Out;
   stderr: Out;
   stdin?: Stdin; // default: not a TTY, nothing piped
+  // With stdin a TTY too, an MCP login may prompt (URL + wait).
+  stderrIsTTY?: boolean; // default: process.stderr.isTTY
+  openUrl?: (url: string) => void; // the browser; tests play it
   signals?: Signals; // SIGINT / SIGTERM abort the headless run
   terminal?: Terminal; // the TUI's; default: process stdin/stdout
   // The provider seam: tests inject a FakeProvider here.
@@ -90,13 +111,14 @@ export function resolveMode(
   isTTY: boolean,
   stdinIsPipe: boolean,
 ): Mode {
-  let args: CliArgs | "help";
+  let args: CliArgs | McpAuthMode | "help";
   try {
     args = parseCli(argv);
   } catch (err) {
     return { kind: "usage", error: (err as Error).message };
   }
   if (args === "help") return { kind: "help" };
+  if ("kind" in args) return args;
   if (args.prompt) return { kind: "headless", args, from: "argv" };
   if (stdinIsPipe) return { kind: "headless", args, from: "stdin" };
   if (args.json || !isTTY) return { kind: "usage" };
@@ -118,7 +140,18 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
     stderr.write(`${error ? `${error}\n` : ""}${USAGE}\n`);
     return 1;
   }
+  if ("server" in mode) {
+    try {
+      return await mcpAuthCommand(mode, deps);
+    } catch (err) {
+      stderr.write(`${(err as Error).message}\n`);
+      return 1;
+    }
+  }
   const { args } = mode;
+  // TTYs on both ends: a server that needs a login may prompt.
+  const interactive =
+    stdin.isTTY && (deps.stderrIsTTY ?? process.stderr.isTTY === true);
   let followUps: string[] = [];
   if (mode.kind === "headless" && mode.from === "stdin") {
     const lines = (await stdin.read())
@@ -177,6 +210,7 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
           cwd,
           trusted: projectTrusted,
           initializeTimeoutMs: settings.mcp.initializeTimeoutMs,
+          login: interactive ? loginUi(deps, true) : undefined,
         });
         mcpClients.push(...clients);
         // Before create(): a resumed session re-activates by name.
@@ -246,9 +280,95 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
   }
 }
 
+// --mcp-logout deletes the token file (mcp.json not read: a removed
+// server can still be logged out of). --mcp-login runs the flow
+// whatever the TTYs, with cached tokens ignored and the registered
+// client kept; Ctrl+C cancels it (exit 1).
+async function mcpAuthCommand(
+  mode: McpAuthMode,
+  deps: CliDeps,
+): Promise<number> {
+  const { env, stdout, stderr } = deps;
+  const { server: name } = mode;
+  const file = authFilePath(env, name);
+  if (mode.kind === "mcp-logout") {
+    const removed = await deleteAuthFile(file);
+    stdout.write(
+      removed
+        ? `logged out of "${name}" (${file})\n`
+        : `not logged in to "${name}"\n`,
+    );
+    return 0;
+  }
+  const cwd = resolve(mode.cwd ?? process.cwd());
+  const trusted = await isTrusted(cwd, { env, flag: mode.trust });
+  const servers = await loadMcpConfig({
+    env,
+    projectDir: trusted ? cwd : undefined,
+  });
+  const server = servers[name];
+  if (!server) {
+    const known = Object.keys(servers).join(", ") || "none";
+    stderr.write(`no MCP server "${name}" in mcp.json; known: ${known}\n`);
+    return 1;
+  }
+  if (!("url" in server)) {
+    stderr.write(`"${name}" is not an HTTP server in mcp.json\n`);
+    return 1;
+  }
+  if (hasAuthorization(server.headers)) {
+    stdout.write(
+      `"${name}" uses a static Authorization header; ` +
+        "nothing to log in to\n",
+    );
+    return 0;
+  }
+  const cancel = new AbortController();
+  const onSignal = () => cancel.abort();
+  deps.signals?.once("SIGINT", onSignal);
+  deps.signals?.once("SIGTERM", onSignal);
+  const tty =
+    (deps.stdin ?? noStdin).isTTY &&
+    (deps.stderrIsTTY ?? process.stderr.isTTY === true);
+  const client = new McpClient(name, server, {
+    env,
+    cwd,
+    freshLogin: true,
+    login: { ...loginUi(deps, tty), signal: cancel.signal },
+  });
+  try {
+    await client.listTools();
+  } catch (err) {
+    const message = (err as Error).message;
+    const label = `mcp "${name}": `;
+    const line = message.startsWith(label) ? message : label + message;
+    stderr.write(`${line}\n`);
+    return 1;
+  } finally {
+    deps.signals?.off("SIGINT", onSignal);
+    deps.signals?.off("SIGTERM", onSignal);
+    await client.close();
+  }
+  if (!(await readAuthFile(file, server.url))?.tokens) {
+    stdout.write(`"${name}" did not ask for a login\n`);
+    return 0;
+  }
+  stdout.write(`logged in to "${name}" (${file})\n`);
+  return 0;
+}
+
+// The URL always goes to stderr (the TUI is not up yet); the
+// browser opens only when there is a terminal to come back to.
+function loginUi(deps: CliDeps, browser: boolean): LoginUi {
+  return {
+    notify: (line) => deps.stderr.write(`${line}\n`),
+    open: browser ? (deps.openUrl ?? openBrowser) : undefined,
+  };
+}
+
 // "help" for --help / -h, whatever else is on the line (an unknown
 // option still throws first: parseArgs is strict).
-function parseCli(argv: string[]): CliArgs | "help" {
+function parseCli(argv: string[]): CliArgs | McpAuthMode | "help" {
   const { values, positionals } = parseArgs({
     args: argv,
     options: {
@@ -265,11 +385,24 @@ function parseCli(argv: string[]): CliArgs | "help" {
       "no-skills": { type: "boolean", default: false },
       "no-mcp": { type: "boolean", default: false },
       "compact-at": { type: "string" },
+      "mcp-login": { type: "string" },
+      "mcp-logout": { type: "string" },
     },
     allowPositionals: true,
     strict: true,
   });
   if (values.help) return "help";
+  const login = values["mcp-login"];
+  const logout = values["mcp-logout"];
+  if (login !== undefined && logout !== undefined) {
+    throw new Error("use --mcp-login or --mcp-logout, not both");
+  }
+  if (login !== undefined || logout !== undefined) {
+    const kind = login !== undefined ? "mcp-login" : "mcp-logout";
+    const server = (login ?? logout ?? "").trim();
+    if (!server) throw new Error(`--${kind} needs a server name`);
+    return { kind, server, cwd: values.cwd, trust: values.trust };
+  }
   const turns = values["max-turns"] ?? String(DEFAULT_MAX_TURNS);
   const maxTurns = Number(turns);
   if (!Number.isInteger(maxTurns) || maxTurns < 1) {

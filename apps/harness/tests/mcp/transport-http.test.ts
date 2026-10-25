@@ -1,9 +1,13 @@
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createLogger } from "../../src/log.ts";
+import { McpAuth, McpAuthRequired } from "../../src/mcp/auth.ts";
 import type { JsonRpcMessage } from "../../src/mcp/jsonrpc.ts";
 import { ACCEPT, HttpTransport } from "../../src/mcp/transport-http.ts";
 import { fakeFetch, sseResponse } from "../helpers/http.ts";
 import { type FakeMcpHttp, startFakeMcpHttp } from "../helpers/mcp-http.ts";
+import { type FakeOAuth, startFakeOAuth } from "../helpers/oauth-http.ts";
+import { useTmpDir } from "../helpers/tmp.ts";
 
 let server: FakeMcpHttp | undefined;
 afterEach(async () => {
@@ -180,6 +184,146 @@ describe("HttpTransport against the in-process fake", () => {
     const { t } = transport(url);
 
     await expect(t.send(INIT)).rejects.toThrow(`mcp "h": POST ${url}:`);
+  });
+});
+
+describe("HttpTransport with an MCP login (the OAuth fake)", () => {
+  const tmp = useTmpDir("transport-auth");
+  let oauth: FakeOAuth;
+  afterEach(async () => {
+    await oauth?.close();
+  });
+
+  const file = () => join(tmp(), "mcp-auth", "h.json");
+  const newAuth = () =>
+    new McpAuth({ name: "h", url: oauth.url, file: file(), fetch: oauth.fetch, log: silent });
+  const silent = createLogger("silent");
+  // A transport with a logged-in McpAuth (a real login through the fake browser).
+  async function loggedIn(fetchFn?: typeof fetch) {
+    const auth = newAuth();
+    await auth.login("", { notify: () => {}, open: (url) => void oauth.browse(url) });
+    const closed: Error[] = [];
+    const t = new HttpTransport({
+      url: oauth.url,
+      headers: {},
+      auth,
+      label: 'mcp "h": ',
+      fetch: fetchFn,
+    });
+    await t.start({ onMessage: () => {}, onClose: (e) => closed.push(e) });
+    return { t, closed };
+  }
+
+  it("a configured Authorization header and no auth: a 401 is today's plain error, no discovery", async () => {
+    oauth = await startFakeOAuth();
+    const { t } = transport(oauth.url, { Authorization: "Bearer static" });
+
+    await expect(t.send(INIT)).rejects.toThrow(
+      'mcp "h": HTTP 401: {"error":"invalid_request","error_description":"Bearer token required"}',
+    );
+    expect(oauth.wellKnown).toEqual([]);
+    expect(oauth.mcp.map((r) => r.authorization)).toEqual(["Bearer static"]);
+  });
+
+  it("no token yet: the 401 rejects McpAuthRequired carrying WWW-Authenticate, and drops the transport", async () => {
+    oauth = await startFakeOAuth();
+    const closed: Error[] = [];
+    const t = new HttpTransport({
+      url: oauth.url,
+      headers: {},
+      auth: newAuth(),
+      label: 'mcp "h": ',
+    });
+    await t.start({ onMessage: () => {}, onClose: (e) => closed.push(e) });
+
+    const err = await t.send(INIT).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(McpAuthRequired);
+    expect((err as McpAuthRequired).message).toBe('mcp "h": HTTP 401: needs a login');
+    expect((err as McpAuthRequired).challenge).toBe(
+      `Bearer realm="FastMCP", resource_metadata="${oauth.base}/.well-known/oauth-protected-resource"`,
+    );
+    expect(closed).toEqual([err]);
+    expect(oauth.mcp.map((r) => r.authorization)).toEqual([null]);
+  });
+
+  it("attaches the cached bearer to every POST", async () => {
+    oauth = await startFakeOAuth();
+    const { t } = await loggedIn();
+
+    await t.send(INIT);
+    await t.send(call(2));
+
+    const bearer = `Bearer ${oauth.issued[0]}`;
+    expect(oauth.mcp.map((r) => r.authorization)).toEqual([bearer, bearer]);
+  });
+
+  it("a 401 on a cached token refreshes silently and retries once", async () => {
+    oauth = await startFakeOAuth();
+    const { t, closed } = await loggedIn();
+    oauth.expireAccessToken();
+
+    await t.send(call(2));
+
+    expect(oauth.mcp.map((r) => r.authorization)).toEqual([
+      `Bearer ${oauth.issued[0]}`,
+      `Bearer ${oauth.issued[1]}`,
+    ]);
+    expect(oauth.tokenRequests.at(-1)?.grant_type).toBe("refresh_token");
+    expect(closed).toEqual([]);
+  });
+
+  it("concurrent 401s on one token make exactly one token request, even after it resolved", async () => {
+    oauth = await startFakeOAuth();
+    // Every 401 but the first is held until the refreshed token is seen,
+    // i.e. until the first request's refresh has finished.
+    let release = () => {};
+    const refreshed = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let first = true;
+    const gated = (async (input: string | URL | Request, init?: RequestInit) => {
+      const res = await oauth.fetch(input, init);
+      const bearer = new Headers(init?.headers).get("authorization");
+      if (oauth.issued[1] && bearer === `Bearer ${oauth.issued[1]}`) release();
+      if (res.status === 401 && !first) await refreshed;
+      if (res.status === 401) first = false;
+      return res;
+    }) as typeof fetch;
+    const { t, closed } = await loggedIn(gated);
+    oauth.expireAccessToken();
+
+    await Promise.all([t.send(call(2)), t.send(call(3)), t.send(call(4))]);
+
+    expect(oauth.tokenRequests.filter((r) => r.grant_type === "refresh_token")).toHaveLength(1);
+    const [old, fresh] = oauth.issued.map((token) => `Bearer ${token}`);
+    expect(oauth.mcp.map((r) => r.authorization).sort()).toEqual(
+      [old, old, old, fresh, fresh, fresh].sort(),
+    );
+    expect(closed).toEqual([]);
+  });
+
+  it("a second 401 after a fresh token is one plain error: no loop", async () => {
+    oauth = await startFakeOAuth();
+    const { t } = await loggedIn();
+    oauth.rejectEveryToken();
+
+    await expect(t.send(call(2))).rejects.toThrow(/^mcp "h": HTTP 401: /);
+
+    expect(oauth.mcp).toHaveLength(2);
+    expect(oauth.tokenRequests.filter((r) => r.grant_type === "refresh_token")).toHaveLength(1);
+  });
+
+  it("a failed refresh rejects McpAuthRequired and drops the transport", async () => {
+    oauth = await startFakeOAuth();
+    const { t, closed } = await loggedIn();
+    oauth.expireAccessToken();
+    oauth.rejectRefresh();
+
+    await expect(t.send(call(2))).rejects.toBeInstanceOf(McpAuthRequired);
+
+    expect(closed.map((e) => e.message)).toEqual(['mcp "h": HTTP 401: needs a login']);
+    expect(oauth.mcp).toHaveLength(1);
   });
 });
 

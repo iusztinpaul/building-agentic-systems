@@ -4,10 +4,20 @@
 // Resources and prompts are never requested. It connects lazily: the
 // first listTools()/callTool() runs the handshake, and a call after
 // the transport dropped (a crashed child, an expired HTTP session)
-// reconnects and re-initialises first.
+// reconnects and re-initialises first. An HTTP server without a
+// configured Authorization header gets an MCP login (auth.ts): its
+// 401 ends the first handshake, the login runs outside the
+// `initialize` timer, and the handshake is retried once.
 
 import { z } from "zod";
 import { log as defaultLog, type Logger } from "../log.ts";
+import {
+  hasAuthorization,
+  type LoginUi,
+  McpAuth,
+  McpAuthRequired,
+} from "./auth.ts";
+import { authFilePath } from "./auth-store.ts";
 import { loadMcpConfig, type McpServer } from "./config.ts";
 import {
   JsonRpcPeer,
@@ -51,11 +61,16 @@ export type McpCallResult = z.infer<typeof CallResult>;
 
 export interface McpClientOptions {
   cwd?: string; // a stdio child's working directory
-  env?: NodeJS.ProcessEnv; // a stdio child's base env
+  // A stdio child's base env; TREE_AGENT_HOME locates mcp-auth/.
+  env?: NodeJS.ProcessEnv;
   timeoutMs?: number; // per call, default 60 s
   initializeTimeoutMs?: number; // default INITIALIZE_TIMEOUT_MS
   log?: Logger;
   fetch?: typeof fetch;
+  // May log in interactively (TTYs, or --mcp-login). Absent: a
+  // server that needs a login is skipped with one warning.
+  login?: LoginUi;
+  freshLogin?: boolean; // --mcp-login: ignore the cached tokens
 }
 
 export class McpClient {
@@ -64,6 +79,8 @@ export class McpClient {
   readonly #o: McpClientOptions;
   readonly #log: Logger;
   readonly #label: string;
+  readonly #auth: McpAuth | undefined;
+  readonly #closing = new AbortController(); // ends a login wait
   #peer: JsonRpcPeer | undefined;
   #transport: Transport | undefined;
   #connecting: Promise<JsonRpcPeer> | undefined;
@@ -80,6 +97,16 @@ export class McpClient {
     this.#o = options;
     this.#log = options.log ?? defaultLog;
     this.#label = `mcp "${name}": `;
+    if ("url" in server && !hasAuthorization(server.headers)) {
+      this.#auth = new McpAuth({
+        name,
+        url: server.url,
+        file: authFilePath(options.env ?? process.env, name),
+        fetch: options.fetch,
+        log: this.#log,
+        fresh: options.freshLogin,
+      });
+    }
   }
 
   get connected(): boolean {
@@ -136,6 +163,7 @@ export class McpClient {
 
   async close(): Promise<void> {
     this.#closed = true;
+    this.#closing.abort();
     const transport = this.#transport;
     this.#peer?.close(new Error(`${this.#label}closed`));
     this.#peer = undefined;
@@ -154,7 +182,38 @@ export class McpClient {
     return this.#connecting;
   }
 
+  // One retry after a login; a second 401 is a plain error.
   async #handshake(): Promise<JsonRpcPeer> {
+    try {
+      return await this.#attempt();
+    } catch (err) {
+      if (!(err instanceof McpAuthRequired) || !this.#auth) throw err;
+      await this.#login(this.#auth, err.challenge);
+    }
+    try {
+      return await this.#attempt();
+    } catch (err) {
+      if (!(err instanceof McpAuthRequired)) throw err;
+      throw new Error(`${this.#label}HTTP 401 after the login`);
+    }
+  }
+
+  // Outside any JSON-RPC timer: bounded by the login's own.
+  async #login(auth: McpAuth, challenge: string): Promise<void> {
+    const ui = this.#o.login;
+    if (!ui) {
+      throw new Error(
+        `${this.#label}needs a login; run tree-agent --mcp-login ` +
+          `${this.name} once, then re-run`,
+      );
+    }
+    const signal = ui.signal
+      ? AbortSignal.any([ui.signal, this.#closing.signal])
+      : this.#closing.signal;
+    await auth.login(challenge, { ...ui, signal });
+  }
+
+  async #attempt(): Promise<JsonRpcPeer> {
     const transport = this.#createTransport();
     const peer = new JsonRpcPeer((m) => transport.send(m), {
       timeoutMs: this.#o.timeoutMs,
@@ -235,6 +294,7 @@ export class McpClient {
       url: server.url,
       headers: server.headers,
       fetch: this.#o.fetch,
+      auth: this.#auth,
     });
   }
 
@@ -254,7 +314,7 @@ export class McpClient {
 }
 
 export interface StartMcpOptions
-  extends Pick<McpClientOptions, "initializeTimeoutMs" | "log"> {
+  extends Pick<McpClientOptions, "initializeTimeoutMs" | "log" | "login"> {
   env: NodeJS.ProcessEnv;
   cwd: string;
   trusted: boolean; // the project .tree-agent/mcp.json too

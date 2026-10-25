@@ -126,6 +126,27 @@ describe("parseMcpConfig errors name the server and the key", () => {
     );
   });
 
+  it("parses the human's exact .pi/mcp.json entry, keeping its type", () => {
+    const entry = { type: "http", url: "https://tree-memory.fastmcp.app/mcp" };
+
+    const parsed = parseMcpConfig({ mcpServers: { "tree-memory": entry } }, "mcp.json");
+
+    expect(parsed.mcpServers["tree-memory"]).toEqual({ ...entry, headers: {}, toolExposure: {} });
+    expect(
+      parseMcpConfig({ mcpServers: { l: { type: "stdio", command: "uv" } } }, "mcp.json").mcpServers
+        .l,
+    ).toMatchObject({ type: "stdio", command: "uv" });
+  });
+
+  it.each([
+    [{ type: "sse", url: "https://x.dev/sse" }],
+    [{ type: "stdio", url: "https://x.dev/mcp" }],
+    [{ type: "http", command: "uv" }],
+    [{ type: 1, url: "https://x.dev/mcp" }],
+  ])("rejects a type that does not match the transport: %j", (entry) => {
+    expect(parse({ s: entry })).toThrow('mcp.json: server "s": type must be http or stdio');
+  });
+
   it("rejects a server with neither command nor url", () => {
     expect(parse({ s: { args: ["x"] } })).toThrow(
       'mcp.json: server "s": needs command (stdio) or url (HTTP)',

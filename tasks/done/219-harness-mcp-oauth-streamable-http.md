@@ -1,6 +1,6 @@
 ---
 id: 219-harness-mcp-oauth-streamable-http
-status: pending
+status: done
 feature: tree-agent-harness
 ---
 
@@ -305,9 +305,9 @@ says so).
 
 ## Acceptance Criteria
 
-- [ ] The human's exact entry `{"type": "http", "url": "https://tree-memory.fastmcp.app/mcp"}` parses;
+- [x] The human's exact entry `{"type": "http", "url": "https://tree-memory.fastmcp.app/mcp"}` parses;
       `type: "sse"`, or `type: "stdio"` with a `url`, fails with `type must be http or stdio` naming the server.
-- [ ] Against the fake AS + protected server: the first 401 drives discovery (header `resource_metadata`, and
+- [x] Against the fake AS + protected server: the first 401 drives discovery (header `resource_metadata`, and
       the origin fallback when the header has none), registration (`token_endpoint_auth_method: "none"`, the
       loopback `redirect_uri`, both grant types), an authorize URL carrying `response_type=code`, `client_id`,
       `redirect_uri`, `code_challenge` = `base64url(sha256(verifier))`, `code_challenge_method=S256`, `state`,
@@ -317,27 +317,27 @@ says so).
       with mode `0600` in a `0700` dir and the shape of Scope 6 — written once with `tokens: null` right after
       registration (a login aborted at the browser step leaves it so) and again with the tokens after the
       exchange.
-- [ ] A later 401 (or `expires_at` passed) refreshes silently and retries once; a refresh answer without
+- [x] A later 401 (or `expires_at` passed) refreshes silently and retries once; a refresh answer without
       `refresh_token` keeps the old one; a failed refresh → the interactive flow (TTY) or the skip warning (no
       TTY); a second 401 after a fresh token → one error, no loop; a configured `Authorization` header → no
       discovery, no flow, today's `HTTP 401` error.
-- [ ] The login runs outside `mcp.initializeTimeoutMs` (an authorize step longer than that timeout still ends
+- [x] The login runs outside `mcp.initializeTimeoutMs` (an authorize step longer than that timeout still ends
       in a connected client, with exactly two `initialize` requests), is bounded by `LOGIN_TIMEOUT_MS` (fake
       timers: pending at 299 999 ms, the exact timeout warning at 300 000 ms, the client kept, the other fake
       server connected and the session usable), and on re-login rebinds the persisted port, re-registering only
       on `EADDRINUSE` or `invalid_client`.
-- [ ] TTY rule: headless with piped stdin (or a non-TTY stderr) and an un-logged-in server prints exactly one
+- [x] TTY rule: headless with piped stdin (or a non-TTY stderr) and an un-logged-in server prints exactly one
       `mcp "<server>": needs a login; run tree-agent --mcp-login <server> once, then re-run`, answers the prompt,
       exits 0, and `--json` stdout is valid JSONL; with TTY stdin and stderr it prints `mcp "<server>": log in
       at <url>` and waits (the fake completes it).
-- [ ] `tree-agent --mcp-login <server>` works with NO `OPENROUTER_API_KEY` in the environment: unknown server
+- [x] `tree-agent --mcp-login <server>` works with NO `OPENROUTER_API_KEY` in the environment: unknown server
       → `no MCP server "<server>" in mcp.json; known: …` exit 1; a stdio server → `"<server>" is not an HTTP
       server in mcp.json` exit 1; a static-header server → `… nothing to log in to` exit 0; success → the file
       and `logged in to "<server>" (<file>)` exit 0. `--mcp-logout <server>` deletes the file (`logged out of
       …`) or prints `not logged in to "<server>"`, exit 0 both. `--help` lists both.
-- [ ] No token, `code_verifier` or `Authorization` value appears in any `log` call or stderr line (spy over the
+- [x] No token, `code_verifier` or `Authorization` value appears in any `log` call or stderr line (spy over the
       whole fake flow at `TREE_AGENT_LOG=debug`).
-- [ ] Live, scratch `TREE_AGENT_HOME`, the hosted entry in its `mcp.json`: `tree-agent --mcp-login tree-memory`
+- [x] Live, scratch `TREE_AGENT_HOME`, the hosted entry in its `mcp.json`: `tree-agent --mcp-login tree-memory`
       prints the real `https://tree-memory.fastmcp.app/oauth2/authorize?…` URL with the parameters of Scope 9
       (paste the URL with `client_id` and `state` redacted into the log), then Ctrl+C → exit 1, the file holds
       `client` and `tokens: null`, and a second `--mcp-login` shows the SAME `client_id` and port (no second
@@ -348,11 +348,11 @@ says so).
       exits 0; then headless `tree-agent "search my memory for agents"` (repo root, `--trust`) calls
       `mcp__tree_memory__search_memory` and answers with NO browser and no URL line; a third run after
       `--mcp-logout tree-memory` with piped stdin prints the skip warning instead.
-- [ ] ADR-016 amendment (verbatim), spec §1/§2/§10.1/§10.2.1/§15/§17, the README sections (verbatim where
+- [x] ADR-016 amendment (verbatim), spec §1/§2/§10.1/§10.2.1/§15/§17, the README sections (verbatim where
       given), the glossary row and the `tree-agent` row amendment are in the diff; the SWE's log records the
       context7 findings on `@modelcontextprotocol/sdk`'s auth module and the decision; `.tree-agent/mcp.json` is
       unchanged.
-- [ ] `make harness-lint-fix && make harness-lint-check && make harness-typecheck && make harness-tests &&
+- [x] `make harness-lint-fix && make harness-lint-check && make harness-typecheck && make harness-tests &&
       make pre-commit` green; no new runtime dependency; `agent-loop.ts` untouched.
 
 ## User Stories
@@ -440,3 +440,233 @@ the ADR-016 reversal of the "OAuth for MCP" non-goal.
   the registered one (RFC 8252 §7.3) is unknown; the persisted-port design does not depend on it.
 
 Ready for implementation.
+
+### [SWE] 2026-10-25 09:40 — Implementation
+
+**Docs read first (tech-docs skill).** context7 is not among this session's connected MCP servers, so the
+fallback of the skill was used: the MCP authorization spec as markdown
+(`https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization.md`), the npm registry
+metadata of `@modelcontextprotocol/sdk@latest` and its tarball (inspected, never executed). The hosted
+server's 401 / PRM / AS metadata were re-probed unauthenticated and match the Scope facts exactly
+(`/.well-known/oauth-protected-resource/mcp` serves the same PRM; the AS also lists an
+`introspection_endpoint`; the PRM carries no `scopes_supported`, so `scope` comes from the AS).
+
+**SDK finding → decision: hand-rolled, recommendation confirmed.** `@modelcontextprotocol/sdk@1.32.2`:
+(a) `client/auth.js` IS importable on its own (the `./*` export maps to compiled `dist/esm/*`, so type
+stripping is irrelevant); it imports `pkce-challenge`, `zod/v4`, `../types.js`, `../shared/auth.js`,
+`../shared/auth-utils.js`, `../server/auth/errors.js`, `../shared/transport.js`. Its `auth(provider, {serverUrl,
+authorizationCode?, fetchFn?})` takes a `fetchFn`, so it is NOT strictly tied to the SDK's transports — the
+"shaped for the SDK's own transports" reason is weaker than stated (it is driven by the caller calling it
+twice, around a redirect). (b) Installing it pulls 17 runtime deps regardless of what is imported: `ajv`,
+`ajv-formats`, `zod`, `cors`, `hono`, `@hono/node-server`, `jose`, `express` (5), `express-rate-limit`,
+`raw-body`, `content-type`, `cross-spawn`, `eventsource`, `eventsource-parser`, `pkce-challenge`,
+`json-schema-typed`, `zod-to-json-schema` (+ peer `@cfworker/json-schema`). `OAuthClientProvider` has 15
+members, 7 required (`redirectUrl`, `clientMetadata`, `clientInformation`, `tokens`, `saveTokens`,
+`redirectToAuthorization`, `saveCodeVerifier`/`codeVerifier`); the loopback listener, the browser, the
+timeout and the TTY rule stay the caller's either way. The dependency tree and the provider size hold, so
+the ADR amendment text was pasted verbatim. Note for PA: "~300 lines" in the amendment is low — the
+Biome-formatted `auth.ts` is 521 lines and `auth-store.ts` 97 (about 300 of code without comments and
+76-column wrapping); I did not edit the PA-authored wording.
+
+**Files modified**
+- `apps/harness/src/mcp/auth.ts` (new) — `McpAuth` (`token()`, `refresh()`, `login(challenge, ui)`), `discover`
+  (RFC 9728 → RFC 8414; PRM `resource` must share the server's origin; every AS endpoint HTTPS or
+  loopback; `S256` and a `registration_endpoint` required), `authorizeUrl`, `challengeOf`, registration,
+  token requests (form-encoded, `resource` always sent), the loopback listener (wrong `state` → 400 and the
+  wait goes on; `error=` ends it; timeout; AbortSignal), `McpAuthRequired`, `OAuthError`, `LOGIN_TIMEOUT_MS`,
+  `hasAuthorization`, `openBrowser`.
+- `apps/harness/src/mcp/auth-store.ts` (new) — token file path (`[^A-Za-z0-9._-]` → `_`), read (ignored when
+  missing/corrupt/another `url`), atomic write (`<file>.<pid>.tmp` created `wx` 0600, then rename; dir 0700 +
+  chmod), delete.
+- `apps/harness/src/mcp/transport-http.ts` — `auth?: McpAuth`: bearer on every POST (and the session
+  DELETE), 401 → one refresh + one retry, second 401 → plain `HTTP 401`, no token / failed refresh →
+  `McpAuthRequired` + `onClose` (the next call re-handshakes).
+- `apps/harness/src/mcp/client.ts` — `McpAuth` per HTTP server without a configured `Authorization`;
+  `#handshake` = attempt → on `McpAuthRequired` the login (outside any JSON-RPC timer) → ONE retry; no
+  `login` UI → `needs a login; run tree-agent --mcp-login <server> once, then re-run`; `close()` aborts a
+  pending login wait; options `login?: LoginUi`, `freshLogin?`; `StartMcpOptions.login`.
+- `apps/harness/src/mcp/config.ts` — `type: z.literal("http"|"stdio").optional()`; a mismatch →
+  `type must be http or stdio` through the existing error path.
+- `apps/harness/src/cli.ts` — `--mcp-login <server>` / `--mcp-logout <server>` (`McpAuthMode`, resolved in
+  `resolveMode`, handled before `requireApiKey`); `CliDeps.stderrIsTTY?` and `CliDeps.openUrl?`; the
+  startup `login` UI only when stdin AND stderr are TTYs; USAGE gains two lines.
+- `apps/harness/src/config/paths.ts` — `UserPaths.mcpAuth` (`$TREE_AGENT_HOME/mcp-auth`).
+- `apps/harness/tests/helpers/oauth-http.ts` (new) — one handler as both a real `127.0.0.1:0` server and
+  an in-memory `fetch` (for fake timers): `/mcp` (401 + the hosted `WWW-Authenticate` until a valid bearer),
+  `/open` (no auth), PRM, AS metadata, `/oauth2/register|authorize|token` (checks `redirect_uri`,
+  `resource`, `sha256(code_verifier)` itself); knobs `expireAccessToken`, `rejectRefresh`, `rejectClient`,
+  `noRegistration`, `noScopes`, `noResourceMetadata`, `omitRefreshToken`, `rejectEveryToken`, `denyNext`;
+  `browse()` plays the browser. `tests/helpers/mcp-http.ts` exports `answer`.
+- Tests: `tests/mcp/auth.test.ts` (new, 24), `tests/mcp/auth-store.test.ts` (new, 6),
+  `tests/mcp/transport-http.test.ts` (+6), `tests/mcp/client.test.ts` (+9; `TREE_AGENT_HOME` stubbed per
+  test so no HTTP client reads the real `~/.tree-agent/mcp-auth`), `tests/mcp/config.test.ts` (+5),
+  `tests/cli.test.ts` (+16; `run()` defaults `stderrIsTTY: false`).
+- Docs: `docs/adrs/016_tree_agent_harness.md` (amendment appended verbatim; the body, as for 218's
+  amendment, untouched), `docs/notes/tree-agent-harness-spec.md` (§1 row, §2 non-goals, file layout, §10.1
+  `type` lines, new §10.2.1, §15 flags, §17 `mcp/auth.ts` row), `apps/harness/README.md` (line 15, usage
+  block, flag rows, Config row, schema block + `type` rule, Timeouts bullet, the hosted-server section
+  verbatim), `docs/glossary.md` (**MCP login** row verbatim; `tree-agent` Notes amended verbatim).
+  `.tree-agent/mcp.json` unchanged; `agent-loop.ts` untouched (180 lines); no dependency added.
+
+**Token file format** (`$TREE_AGENT_HOME/mcp-auth/<key>.json`, 0600 in a 0700 dir): exactly Scope 6 —
+`{url, issuer, endpoints{authorization, token, registration}, resource, client{client_id, client_secret|null,
+redirect_uri, registered_at}, tokens{access_token, refresh_token|null, expires_at|null, scope|null}|null}`.
+
+**Tests**
+- Unit: 984 passing, 0 failing, 49 files (before: 918 / 47) — `make harness-tests` (live tests ran: the
+  Makefile exports `.env`).
+- Integration: N/A (the harness has none, AGENTS.md).
+
+**Acceptance criteria**
+- [x] entry parses / `type` mismatch — `tests/mcp/config.test.ts::parses the human's exact .pi/mcp.json
+  entry…`, `::rejects a type that does not match the transport` (×4).
+- [x] the fake-AS flow — `tests/mcp/auth.test.ts::discover…` (header + origin fallback, PRM/AS scopes, refusals),
+  `::authorizeUrl…`, `::registers a public loopback client, prints the URL, exchanges the code and stores the
+  file`, `::writes the registration with tokens: null before the browser step`, `::a wrong state is answered
+  400 and the wait goes on`, `tests/mcp/client.test.ts::the login runs outside initialize's timer…` (retried
+  handshake with the bearer).
+- [x] refresh / no loop / header precedence — `auth.test.ts::McpAuth.token / refresh` (7),
+  `transport-http.test.ts::HttpTransport with an MCP login` (6), `client.test.ts::a failed refresh
+  mid-session…` (TTY branch), `::a failed refresh at startup without a TTY…` (skip branch), `::a 401 after the login is one error…`, `::a configured Authorization header…`.
+- [x] outside the initialize timer (two `initialize`s), 5-minute bound with fake timers (both the
+  `McpAuth` boundary and `connectMcpServers` with the other server connected and usable), port rebound,
+  re-registration on `EADDRINUSE` / `invalid_client` — `client.test.ts`, `auth.test.ts::re-login rebinds…`,
+  `::re-registers on a fresh port…`, `::an exchange answered invalid_client…`, `::a refresh answered
+  invalid_client…`.
+- [x] TTY rule — `cli.test.ts::headless, piped stdin, not logged in…`, `::headless --json with a non-TTY
+  stderr…`, `::TTY stdin and stderr: the URL line, the wait…; a later run is silent`.
+- [x] `--mcp-login` / `--mcp-logout` / `--help` — `cli.test.ts::main (MCP login)` (no key, TTY and non-TTY,
+  unknown / stdio / static-header, trusted project file, `error=`, Ctrl+C, logout both branches).
+- [x] no secret in logs — `auth.test.ts::secrets never reach the log`, `cli.test.ts::no token, code,
+  code_verifier or Authorization value in any log call or stderr line` (spies on every `log` level over a
+  login + a refreshing run at `TREE_AGENT_LOG=debug`).
+- [x] live (below). - [ ] [HUMAN] the browser login. - [x] docs. - [x] cadence.
+
+**Mutation probes** (each applied alone, `tests/mcp` + `tests/cli.test.ts`, 290 tests, then restored):
+PKCE verifier not hashed → 28 failed; `state` not checked → 1 failed; `resource` dropped from the token
+request → 27 failed; header precedence removed → 5 failed; skip rule removed (`login` UI always on) → 2
+failed; 0600 → 0644 → 3 failed. All six killed.
+
+**Evidence** (live: scratch `TREE_AGENT_HOME` and `HOME` under the session scratchpad; `client_id`,
+`state`, `code_challenge` redacted)
+```
+$ env -i PATH=… HOME=<scratch>/fakehome TREE_AGENT_HOME=<scratch>/home \
+    timeout -s INT 20 node src/cli.ts --mcp-login tree-memory </dev/null   # no TTY: no browser
+mcp "tree-memory": log in at https://tree-memory.fastmcp.app/oauth2/authorize?response_type=code&client_id=<redacted>&redirect_uri=http%3A%2F%2F127.0.0.1%3A61160%2Fcallback&code_challenge=<redacted>&code_challenge_method=S256&state=<redacted>&resource=https%3A%2F%2Ftree-memory.fastmcp.app&scope=email+offline_access+openid+profile
+mcp "tree-memory": login cancelled
+$ ls -la <scratch>/home/mcp-auth   → drwx------ mcp-auth/, -rw------- tree-memory.json
+  file: url, issuer, endpoints (…/oauth2/authorize|token|register), resource https://tree-memory.fastmcp.app,
+        client {client_id <33 chars>, client_secret null, redirect_uri http://127.0.0.1:61160/callback,
+        registered_at 2026-10-25T09:33:11.167Z}, tokens null
+$ … timeout --preserve-status -s INT 10 node src/cli.ts --mcp-login tree-memory; echo exit=$?
+mcp "tree-memory": log in at https://tree-memory.fastmcp.app/oauth2/authorize?…redirect_uri=http%3A%2F%2F127.0.0.1%3A61160%2Fcallback…
+mcp "tree-memory": login cancelled
+exit=1
+SAME client_id and redirect_uri (port) as the first login; the URL carries the stored client_id
+$ curl -o /dev/null -w '%{http_code} -> %{redirect_url}' "<the printed URL>"
+302 -> https://horizon.prefect.io/tree-memory/authorize (query elided)   # the AS accepted the request
+$ echo "say ok" | TREE_AGENT_HOME=<scratch>/home HOME=<scratch>/fakehome make -s -C apps/harness run; echo exit=$?
+ok
+[tree-agent] warn: mcp "tree-memory": needs a login; run tree-agent --mcp-login tree-memory once, then re-run
+exit=0          # the token file was not touched (no registration in headless)
+$ … node src/cli.ts --mcp-logout tree-memory  → logged out of "tree-memory" (<scratch>/home/mcp-auth/tree-memory.json), exit 0
+$ … node src/cli.ts --mcp-logout tree-memory  → not logged in to "tree-memory", exit 0
+$ … node src/cli.ts --mcp-login nope          → no MCP server "nope" in mcp.json; known: tree-memory, exit 1
+$ make harness-lint-fix && make harness-lint-check && make harness-typecheck && make harness-tests && make pre-commit
+Checked 114 files … No fixes applied. / tsc --noEmit clean / Test Files 49 passed (49), Tests 984 passed (984) / all hooks Passed
+```
+One dynamic registration was made at the real AS (the first live login); the second reused it. The last
+live step was `--mcp-logout`, so the scratch token file is gone: re-running the Scope 9 sequence from that
+home registers one more client. The recorded outputs are kept in the session scratchpad under `live/`
+(`login1.err`, `login2.err`, `client1.txt`, `client2.txt` — these two hold the raw client_id, not a secret
+but not for pasting — `headless.out`, `headless.err`).
+
+**Notes**
+- Deviations: (1) the `log in at <url>` line is written to the CLI's stderr directly, not through `log.warn`,
+  so `TREE_AGENT_LOG=error|silent` can never hide the URL a user is waiting on; the skip and timeout
+  warnings go through `connectMcpServers`' existing single `log.warn`. (2) `invalid_client` (refresh or
+  exchange) deletes the token file instead of keeping an in-memory flag, so the next login registers again
+  in this process or a later one; an exchange `invalid_client` ends that login with the error (the user
+  re-runs), no automatic second browser round. (3) `--mcp-logout` does not read `mcp.json` (a server
+  removed from the config can still be logged out of). (4) `--mcp-login` against a server that never
+  answers 401 prints `"<server>" did not ask for a login`, exit 0, instead of a false `logged in`. (5) The
+  callback pages are HTML with the server name / `error_description` HTML-escaped. (6) Added beyond the
+  task: the PRM `resource` must share the MCP server's origin, and AS endpoints must be HTTPS or loopback
+  (the MCP spec's "MUST be served over HTTPS"); `Authorization` is also sent on the session DELETE.
+  (7) The test knob for the login bound is `LoginUi.timeoutMs` (passed through `McpClientOptions.login`),
+  not a separate `McpClientOptions.loginTimeoutMs`. (8) ADR-016's body (the diagram's `mcp/client.ts … no
+  OAuth` label, the non-goals line) is untouched, following 218's precedent: the appended amendment
+  records both changes. (9) `CliDeps.openUrl` is a second new seam next to `stderrIsTTY`: tests play the browser through it, and
+  the real opener is only ever called on a TTY.
+- Finding (not fixed, out of scope): `runTui` calls `tui.start()` before `open()`, so in the TUI the URL
+  line goes to stderr while the TUI already owns the screen and may be overdrawn; the browser still opens,
+  and `--mcp-login` is the reliable path. A 401 mid-session whose refresh fails fails THAT call (the
+  transport is dropped) and the next call runs the login, per Scope 5.
+- Ctrl+C in a real terminal: `--mcp-login` installs SIGINT/SIGTERM handlers through `CliDeps.signals`, so
+  it exits 1 (verified with `timeout --preserve-status -s INT`), not Node's 130.
+- `[HUMAN]` remains: the browser login on the owner's machine, the authenticated `search_memory` run and
+  the post-logout skip; and whether the Horizon AS accepts a loopback redirect on a port other than the
+  registered one stays unknown (the design does not depend on it).
+
+### [Tester] 2026-10-25 11:55 — QA
+
+**VERDICT: PASS** (suite 984/984 green; live evidence confirmed; no AC fails; 5 non-blocking notes below)
+
+**Test summary**
+- Format / lint / typecheck / pre-commit: PASS (`make harness-format-check harness-lint-check harness-typecheck` exit 0, "Checked 114 files … No fixes applied", tsc clean; `make pre-commit` all hooks Passed, exit 0).
+- Unit tests: `make harness-tests` → Test Files 49 passed (49), Tests 984 passed (984), exit 0 (live OpenRouter tests ran). Integration: N/A (the harness has none).
+- Warnings: 0 (no "unhandled" / "warning" / "deprecat" line in the run).
+- Untouched as required: `.tree-agent/mcp.json` and `apps/harness/src/loop/agent-loop.ts` (180 lines) absent from `git status`; no `package.json` / lockfile change (no new dependency); `apps/memory`, `.env*` and the untracked "Implementation Spec" untouched.
+- Own mutation probes (restored, diff-verified): `state` check disabled → 1 failed (`a wrong state is answered 400…`); a retry loop on a second 401 added → 2 failed (`transport-http … a second 401 after a fresh token is one plain error: no loop`, `client … a 401 after the login is one error`).
+
+**Live (hosted server, scratch `TREE_AGENT_HOME`/`HOME` under the session scratchpad `adv/`; no `.env` value used against it)**
+- `POST /mcp` unauthenticated → 401 + `WWW-Authenticate: Bearer realm="FastMCP", resource_metadata="https://tree-memory.fastmcp.app/.well-known/oauth-protected-resource"`; PRM and AS metadata equal the task's probed facts. (Disclosure: this one unauthenticated 401 probe was a POST, not a GET; it is the same probe the task cites.)
+- `node src/cli.ts --mcp-login tree-memory </dev/null`, `env -i`: `mcp "tree-memory": log in at https://tree-memory.fastmcp.app/oauth2/authorize?response_type=code&client_id=<redacted>&redirect_uri=http%3A%2F%2F127.0.0.1%3A62353%2Fcallback&code_challenge=<redacted>&code_challenge_method=S256&state=<redacted>&resource=https%3A%2F%2Ftree-memory.fastmcp.app&scope=email+offline_access+openid+profile`; SIGINT → `mcp "tree-memory": login cancelled`, exit 1; dir 700, file 600, `tokens: null`, redirect `http://127.0.0.1:62353/callback`.
+- Second `--mcp-login`: same client_id (sha256 prefix fc33b19797 both times) and same port 62353, SIGINT → exit 1 (one registration at the real AS from this pass).
+- `echo "say ok" | TREE_AGENT_HOME=<scratch> make -s -C apps/harness run` → stdout `ok`, stderr exactly one `[tree-agent] warn: mcp "tree-memory": needs a login; run tree-agent --mcp-login tree-memory once, then re-run`, exit 0, token file untouched.
+
+**E2E adversarial pass** (own fake MCP server + AS with a control plane, `scratchpad/adv/fakeas.mts`; drivers `adv1-5.mts`, `cli2.sh`, `head1.sh`, `head2.sh`)
+- Happy path, real CLI process against the fake: `--mcp-login fk` (piped stdin) prints the URL, a curl plays the browser, `logged in to "fk" (<file>)` exit 0, file 0600/dir 0700. Via a pty (`script`) with a stub `open`: `tree-agent "say ok"` prints the `log in at` line, calls the browser opener once, logs in, answers `ok`, exit 0; the second run is silent (no URL, opener not called, 1 registration in total). PASS.
+- Callback with wrong `state`, missing `code`, and `error=` with a wrong `state`: 400, 400, 400, wait continues; the right redirect then completes (200, tokens stored). PASS. `error=`/`error_description` carrying `<img src=x onerror=…>"&` → HTML-escaped page (`&#60;img…&#62;&#34;&#38;`), message to stderr. PASS.
+- Token endpoint 200 with no `access_token`, non-JSON 200, HTTP 500: each → `mcp "b": token request: unexpected answer` / `token request failed: HTTP 500`, exit path clean, `tokens` stays null. PASS. `expires_in` as the string `"3600"`: the same "unexpected answer" and the one-shot code is spent (see note 2). PASS with note.
+- AS metadata with `http://as.example.invalid` endpoints: `…/oauth2/authorize: authorization endpoints must use https`, no registration request, no file written. PASS. PRM `resource` = `https://evil.example`: `…resource https://evil.example is not http://127.0.0.1:…/mcp`, no further request. PASS. PRM whose `authorization_servers[0]` is plain http non-loopback: `fetch failed` (see note 3). PASS with note.
+- 401 on the retry after a successful refresh: requests `POST /mcp+bearer | POST /oauth2/token | POST /mcp+bearer`, then `mcp "srv": HTTP 401: {"error":"invalid_request"}`; no loop. PASS.
+- Refresh answered `invalid_grant`: no UI → `needs a login; run tree-agent --mcp-login srv once, then re-run`; with a UI → one login, `registrationsAdded: 0`, tools listed. PASS.
+- 8 and 20 concurrent `tools/call`s all 401 at once: all succeed; token requests 1 or 2 per burst (not N) (see note 1). PASS with note.
+- Login longer than `initializeTimeoutMs` (real time, init 300 ms, login 1 500 ms, bound 3 000 ms): connected after 1 919 ms. Nobody completes (bound 700 ms): `login timed out after 0.7 s; run tree-agent --mcp-login srv to log in` after 709 ms, file `tokens: null`. PASS (the 300 000 ms fake-timer boundary is the SWE's `auth.test.ts::is bounded by LOGIN_TIMEOUT_MS` and a client test; both in the green suite).
+- Crash between registration and token write: `--mcp-login` (piped stdin, so no browser), SIGKILL right after the URL line → `fk.json` exists, 0600 in a 0700 dir, `tokens: null`, client present, no `.tmp` left; the next `--mcp-login` printed a URL for the same client and port, completed, 1 registration in total. PASS.
+- Token file whose `url` differs: ignored, the next login registers a new client (2 registrations), overwrites on success. PASS. Corrupt (truncated JSON) file: treated as absent → skip message, no crash. PASS.
+- Token file 0644 in a 0755 dir: read and used silently (list tools works), mode stays 644 until the next write; the refresh rewrite restored 600 and dir 700. PASS with note 4.
+- `--mcp-login` with piped stdin: URL on stderr, no browser, waits for the callback until completed/cancelled (as the task says). SIGINT exit 1 and SIGTERM exit 1, both `login cancelled`, process gone, port released. PASS.
+- Headless, piped stdin, `--json`, un-logged-in fake: exit 0, stdout 4 lines all valid JSON, stderr exactly one `needs a login` warning, the fake saw one `POST /mcp` and no discovery/registration. Argv prompt with `</dev/null`: `ok`, one warning, exit 0, no `mcp-auth` dir created. PASS.
+- Configured `Authorization` header + 401: `mcp "srv": HTTP 401: {…}`, requests `/mcp` only, no `mcp-auth` dir. PASS.
+- Config: human entry parses; `type: "sse"`, `{type:"http", command}`, `{type:"stdio", url}`, `type: 3`, `type: "HTTP"` all → `<home>/mcp.json: server "s": type must be http or stdio`; `{type:"http", url, command}` → `set command (stdio) or url (HTTP), not both`. PASS.
+- CLI args: `--mcp-login ""` → `--mcp-login needs a server name` + usage, exit 1; `--mcp-login` alone → parseArgs "argument missing" + usage, exit 1; both flags → `use --mcp-login or --mcp-logout, not both`, exit 1; stdio server → `"st" is not an HTTP server in mcp.json` exit 1; static header → `… nothing to log in to` exit 0; unknown → `no MCP server "nope" in mcp.json; known: fk, st, hdr` exit 1; `--mcp-logout '../../etc/passwd'` → `not logged in …` (key sanitised to `.._.._etc_passwd`, nothing outside `mcp-auth/` touched); logout twice → `logged out of …` then `not logged in to "fk"`, exit 0 both. PASS.
+- Secret hygiene: spies over every log level in `adv3.mts` (login, refresh, invalid_grant, 8 concurrent refreshes) → no `at-*`/`rt-*`/`code-*` line; with `TREE_AGENT_LOG=debug` the real-process stderr, the pty typescripts, headless stdout/stderr and the session JSONLs under the scratch homes contain none of the token values held by any `mcp-auth` file (python scan, 0 hits) and no `code_verifier`/`Authorization` value. The authorize URL itself (client_id, challenge, state) is printed by design. PASS.
+
+**Acceptance criteria**
+- [x] PASS — human entry parses; `sse` / `stdio`+url → `type must be http or stdio` naming the server — `config.test.ts` (5 new) and the run above.
+- [x] PASS — fake-AS flow (discovery header + fallback, registration body, authorize URL, wrong state 400, exchange, bearer, 0600/0700, `tokens: null` before the browser step) — `auth.test.ts` (24) green; `cli2.sh` shows the file 0600/0700 with `tokens: null` after SIGKILL at the browser step.
+- [x] PASS — refresh/retry once/keeps old refresh_token/failed refresh → login or skip/no loop/static header — `auth.test.ts::McpAuth.token / refresh`, `transport-http.test.ts` (6), `client.test.ts`; re-proved above (`D`, `E`, `N`) and by mutation.
+- [x] PASS — login outside `initializeTimeoutMs`, 5-minute bound (fake timers), port rebound, re-registration only on `EADDRINUSE`/`invalid_client` — `client.test.ts`, `auth.test.ts` (green); real-time re-run above.
+- [x] PASS — TTY rule: piped/non-TTY stderr → one warning, answer, exit 0, `--json` valid; TTY → URL line + wait — `cli.test.ts` (green) and `head1.sh` / `head2.sh` above.
+- [x] PASS — `--mcp-login` / `--mcp-logout` / `--help` without `OPENROUTER_API_KEY` (`env -i`) — messages and exit codes as specified (`cli2.sh`).
+- [x] PASS — no token / verifier / `Authorization` value in any log call or stderr line — spy + scan above, `auth.test.ts::secrets never reach the log`, `cli.test.ts::no token, code, code_verifier or Authorization value…`.
+- [x] PASS — live (see Live section; second login reuses client_id and port; headless skip warning, `ok`, exit 0).
+- [ ] [HUMAN] — browser login on the owner's machine: awaiting human verification (not attempted, as instructed).
+- [x] PASS — docs: ADR-016 amendment, README hosted-server section and glossary rows are verbatim the task text (diff read); spec §1/§2/§10.1/§10.2.1/§15/§17 in the diff; the SWE log records the SDK findings; `.tree-agent/mcp.json` unchanged.
+- [x] PASS — cadence green, no new runtime dependency, `agent-loop.ts` untouched.
+
+**Other issues found (none blocks the verdict; the orchestrator decides)**
+1. Concurrent 401s can refresh twice. `HttpTransport.#authorizedPost` (`transport-http.ts`, the `await auth.refresh()` after a 401) always asks for a refresh when `sent` is set. A call whose 401 arrives after another call's refresh has already finished starts a second token request (observed: 20 concurrent calls → 1 request in one run, 2 in three runs; every call still succeeded). Harmless against a stateless AS, but an AS that invalidates access tokens on refresh could 401 the first call's retry. Fix: before refreshing, compare `sent` with `auth`'s current access token and retry with it when it already differs.
+2. `expires_in` as a string (`"3600"`, seen from some servers) fails the whole login with the opaque `token request: unexpected answer` after the one-shot code is spent (`auth.ts:81-86`, `z.number()`). Suggest `z.coerce.number()`.
+3. `discover()` GETs `authorization_servers[0]`'s metadata before checking its scheme (the `secure()` check only covers the three endpoints afterwards), and a network failure there surfaces as a bare `mcp "x": fetch failed` / `read ECONNRESET` with no URL (`getJson` does not wrap `fetch` errors). The RFC 8414 `issuer` is also not compared with the AS URL. Suggest `secure(as.href)` first and a `${url}: ${cause}` wrapper.
+4. A token file that is group/world readable (0644) is read silently; the 0600 is only re-established on the next write. A one-line warning (or a `chmod`) on read would match the "never leak" posture.
+5. Server keys that sanitise to one file (`a/b` and `a_b`) share `mcp-auth/a_b.json`; their different `url`s make them ping-pong (each login overwrites the other's registration). Rare; a note in the README or a hash suffix would do.
+- Not exercised (as instructed): the real browser login, `fmcp_` as bearer, and the TUI drawing over the URL line (the SWE's documented finding). The TTY branch was exercised with a pty plus a stub browser opener against the fake, not the real `open`.
+- Follow-up scan (after the entry above): the 5 session JSONLs under the scratch homes, `scratchpad/suite.txt`, the pty typescripts and every real-process stdout/stderr capture contain no `at-N` / `rt-N` / `code-N` token value, `code_verifier`, `access_token`, `refresh_token` or `Bearer <value>` (0 hits). One scratch fake AS (pid 30139, from an aborted first driver script) is still running on a random loopback port; nothing else depends on it.
+
+**VERDICT: PASS**
+
+### [SWE] 2026-10-25 12:05 — Tester fold-ins
+Folded in the Tester's issues 1–5, each with a test: `expires_in` coerced (missing → 1 h) and the unexpected-answer error names the field (`auth.test.ts`); a 401 on an already-replaced token retries with the new one, else joins McpAuth's in-flight refresh (`transport-http.test.ts`, 3 concurrent 401s → 1 token request); `discover()` checks the AS scheme before fetching, wraps network failures as `GET <url>: …` and refuses an `issuer` mismatch (`auth.test.ts`); a token file read with a mode other than 0600 is chmodded back with one warning, and a key outside `[A-Za-z0-9._-]` gets a `~<sha256[:8]>` suffix so `a/b` and `a_b` no longer share a file (`auth-store.test.ts`; spec §10.2.1 updated).

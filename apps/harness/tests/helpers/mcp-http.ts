@@ -34,7 +34,7 @@ const TOOLS = [
 ];
 
 // biome-ignore lint/suspicious/noExplicitAny: a JSON-RPC frame
-function answer(message: any): Record<string, unknown> {
+export function answer(message: any): Record<string, unknown> {
   const { method, params } = message;
   if (method === "initialize") {
     return {

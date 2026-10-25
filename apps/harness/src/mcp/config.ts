@@ -1,6 +1,7 @@
 // mcp.json (spec §10.1): `{mcpServers: {<name>: server}}`, a server
 // being stdio `{command, args, env}` or streamable HTTP `{url,
-// headers}`, each with a `toolExposure` glob map. Sources, merged by
+// headers}` (an optional `type` must match), each with a
+// `toolExposure` glob map. Sources, merged by
 // server name, later wins whole: ~/.tree-agent/mcp.json, then
 // <cwd>/.tree-agent/mcp.json for a trusted cwd only. The repo-root
 // .mcp.json (Claude Code's) is never read (ADR-016 §3).
@@ -10,11 +11,13 @@ import { z } from "zod";
 import { projectPaths, userPaths } from "../config/paths.ts";
 
 const Stdio = z.object({
+  type: z.literal("stdio").optional(),
   command: z.string(),
   args: z.string().array().default([]),
   env: z.record(z.string()).default({}),
 });
 const Http = z.object({
+  type: z.literal("http").optional(),
   url: z.string().url(),
   headers: z.record(z.string()).default({}),
 });
@@ -142,6 +145,8 @@ function phrase(issue: z.ZodIssue): string {
           : `must be ${article(issue.expected)}`;
   } else if (issue.code === "invalid_enum_value") {
     text = `must be one of ${issue.options.join(", ")}`;
+  } else if (issue.code === "invalid_literal") {
+    text = "must be http or stdio"; // `type`, the only literal
   } else if (
     issue.code === "invalid_string" &&
     issue.validation === "url"

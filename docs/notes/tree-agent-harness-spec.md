@@ -20,7 +20,7 @@ Guiding principle, from pi: **minimal core, everything else in files the user ow
 | Schema lib | `zod` + `zod-to-json-schema` | Tool params and config validated once, exported as JSON Schema. |
 | TUI | `@earendil-works/pi-tui` (npm 1.4.0), imported | Same as pi. Rendering is not the lesson; the TUI module is ~6 components over `AgentEvent`s. |
 | Sandbox | `quickjs-emscripten` (npm 0.32.0), WASM | Same engine as `pi-codemode`. The bridge (`tools.*` → registry → permission gate) is hand-written because it *is* the lesson. |
-| MCP client | Hand-rolled: stdio + streamable HTTP, JSON-RPC 2.0, `initialize` / `tools/list` / `tools/call` only | Same stance as `pi-mcp` (no official SDK). ~300 lines; OAuth and SSE transport out of scope. |
+| MCP client | Hand-rolled: stdio + streamable HTTP, JSON-RPC 2.0, `initialize` / `tools/list` / `tools/call` only | Same stance as `pi-mcp` (no official SDK). ~300 lines; OAuth 2.1 for streamable-HTTP servers (task 219); the legacy SSE transport out of scope. |
 | Session persistence | Append-only JSONL, pi's entry envelope (`id`, `parentId`, `timestamp`, `type`), written **linearly** | pi-compatible file shape; `/tree` navigation, forks and branch summaries stay non-goals. |
 | Tool exposure | `direct · deferred · codemode · hidden`; MCP default `codemode`; `tool_search` for `deferred` | pi's full exposure model (§8, §10). |
 | Permissions | Two modes only: `ask` (prompt on every non-read-only call) and `auto` (decision model flags dangerous calls, prompt only on those). TUI defaults to `ask`, headless to `auto` | User decision. No rule files, no bypass. Headless in `ask` mode would exit on the first write. |
@@ -46,7 +46,7 @@ Guiding principle, from pi: **minimal core, everything else in files the user ow
 
 ### Non-goals
 
-Subagents, plan mode, session tree navigation / forking / branch summaries, extensions API, prompt templates, Telegram or any channel, auto-memory (`MEMORY.md`, dream), parallel tool execution, OAuth for MCP, MCP resources/prompts, model catalog beyond OpenRouter, permission rule files, clarification and compaction decision models, themes.
+Subagents, plan mode, session tree navigation / forking / branch summaries, extensions API, prompt templates, Telegram or any channel, auto-memory (`MEMORY.md`, dream), parallel tool execution, MCP resources/prompts, model catalog beyond OpenRouter, permission rule files, clarification and compaction decision models, themes.
 
 ### Chapter 6 mapping
 
@@ -124,6 +124,8 @@ chapter-6/tree-agent/
     mcp/transport-stdio.ts  child process, newline-delimited JSON
     mcp/transport-http.ts   streamable HTTP (POST + SSE response)
     mcp/client.ts           initialize, listTools, callTool
+    mcp/auth.ts             MCP login: OAuth 2.1 for HTTP servers
+    mcp/auth-store.ts       mcp-auth/<server>.json token file
     mcp/register.ts         MCP tool → ToolDefinition
     permissions/gate.ts     resolve(): Decision
     permissions/decision-model.ts  auto-mode classifier
@@ -429,9 +431,11 @@ Description cap 250 chars (truncated with `…`); the whole section cap is 1% of
 
 ```ts
 const McpServer = z.union([
-  z.object({ command: z.string(), args: z.string().array().default([]),
+  z.object({ type: z.literal("stdio").optional(),                // a mismatch: "type must be http or stdio"
+             command: z.string(), args: z.string().array().default([]),
              env: z.record(z.string()).default({}) }),           // stdio
-  z.object({ url: z.string().url(), headers: z.record(z.string()).default({}) }), // streamable HTTP
+  z.object({ type: z.literal("http").optional(),
+             url: z.string().url(), headers: z.record(z.string()).default({}) }), // streamable HTTP
 ]).and(z.object({
   toolExposure: z.record(z.enum(["direct", "deferred", "codemode", "hidden"])).default({}), // glob → exposure
 }));
@@ -445,6 +449,32 @@ Example: `"toolExposure": { "search_*": "direct", "get_*": "codemode", "admin_*"
 - JSON-RPC 2.0 over two transports. **stdio**: spawn `command args`, one JSON object per line on stdin/stdout, stderr to the log. **Streamable HTTP**: `POST url` with `Accept: application/json, text/event-stream`; a JSON body is one response, an SSE body is read with the same `sse.ts` parser as the provider; `Mcp-Session-Id` echoed if returned.
 - Handshake: `initialize` (protocol version `2025-06-18`, capabilities `{}`), `notifications/initialized`, `tools/list` (paginate on `nextCursor`), then `tools/call` on demand. Everything else (`resources`, `prompts`, server→client requests) is answered with JSON-RPC `-32601` and ignored.
 - Connect **lazily**: list tools at startup (needed for the prompt line, the BM25 index and codemode declarations), reconnect on first call if the transport dropped. Per-call timeout 60 s.
+
+### 10.2.1 Authorization (`mcp/auth.ts`)
+
+The MCP authorization spec (2025-06-18, OAuth 2.1) for streamable-HTTP servers, hand-rolled with `crypto`, `http` and `fetch` (ADR-016 amendment 2026-10-25). Built for the hosted `tree-memory` (Prefect Horizon), which answers an unauthenticated POST with `401` + `WWW-Authenticate: Bearer realm="FastMCP", resource_metadata="https://tree-memory.fastmcp.app/.well-known/oauth-protected-resource"`.
+
+- **When.** Only for an HTTP server whose `headers` carry no `Authorization`: a configured header (a static token, a Horizon `fmcp_` key) always wins, and its 401 stays the plain `HTTP 401` error. stdio servers never use it.
+- **Discovery.** The 401's `resource_metadata` (fallback: the origin's `/.well-known/oauth-protected-resource`) → `{resource, authorization_servers[0]}` (RFC 9728; `resource` must be the server's origin) → `<as>/.well-known/oauth-authorization-server` (RFC 8414; the AS URL HTTPS or loopback before it is fetched, `issuer` equal to it (§3.3), `S256` in `code_challenge_methods_supported`, a `registration_endpoint`, every endpoint HTTPS or loopback; a network failure reads `GET <url>: <why>`).
+- **Registration** (RFC 7591), once per server: `{client_name: "tree-agent", redirect_uris: ["http://127.0.0.1:<port>/callback"], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none"}`. The port is chosen by binding `127.0.0.1:0` and persisted with the client; later logins rebind it and register again only on `EADDRINUSE`, or after the AS answered `invalid_client` (the token file is then deleted). The registration is written before the browser step, with `tokens: null`.
+- **Authorization** (PKCE S256 + RFC 8707): `code_verifier` 64 random bytes, `code_challenge = base64url(sha256(verifier))`, `state` 32 random bytes; the URL carries `response_type=code`, `client_id`, `redirect_uri`, `code_challenge`, `code_challenge_method=S256`, `state`, `resource` (the PRM `resource` verbatim) and `scope` (PRM `scopes_supported`, else the AS's, space-joined; omitted when neither). The loopback listener answers a wrong `state` with 400 and keeps waiting; `error=` ends the wait with `error_description`.
+- **Tokens.** Exchange: `grant_type=authorization_code, code, redirect_uri, client_id, code_verifier, resource` (form-encoded). Refresh: `grant_type=refresh_token, refresh_token, client_id, resource`; an answer without `refresh_token` keeps the old one; `expires_in` may be a numeric string, and an answer without it counts as expiring in 1 h. A cached token rides every request as `Authorization: Bearer …`; an `expires_at` in the past or a 401 → one silent refresh and one retry; a failed refresh → the login (below); a second 401 after a fresh token → a plain error, never a loop.
+- **The login and its bound.** The first 401 ends the handshake with a typed `McpAuthRequired`; `McpClient` runs the login OUTSIDE the `initialize` timer, then retries the handshake once with a fresh one. The login prints `mcp "<server>": log in at <url>` on stderr, opens the browser (`open` / `xdg-open` / `cmd /c start`, failure ignored) and waits at most `LOGIN_TIMEOUT_MS` = 5 min (a constant; tests inject it), then `mcp "<server>": login timed out after 5 min; run tree-agent --mcp-login <server> to log in` — the server is kept unconnected and its next call retries.
+- **TTY rule.** The login may prompt only when stdin AND stderr are TTYs, or under `--mcp-login`. Otherwise (piped stdin, redirected stderr, CI) the server is skipped with exactly one warning, `mcp "<server>": needs a login; run tree-agent --mcp-login <server> once, then re-run`, and the run goes on (exit code unaffected, `--json` stdout stays JSONL).
+- **Token file** (`mcp/auth-store.ts`): `$TREE_AGENT_HOME/mcp-auth/<server-key>.json` (a key of `[A-Za-z0-9._-]` as is; any other: `[^A-Za-z0-9._-]` → `_`, then `~` and 8 hex digits of its sha256, so `a/b` and `a_b` never share a file), directory `0700`, file `0600` (a file read with another mode is tightened to `0600`, with one warning naming it), written atomically; every date ISO 8601 UTC:
+
+  ```json
+  { "url": "https://tree-memory.fastmcp.app/mcp", "issuer": "https://tree-memory.fastmcp.app",
+    "endpoints": { "authorization": "…", "token": "…", "registration": "…" },
+    "resource": "https://tree-memory.fastmcp.app",
+    "client": { "client_id": "…", "client_secret": null, "redirect_uri": "http://127.0.0.1:51823/callback",
+                "registered_at": "2026-10-25T10:00:00.000Z" },
+    "tokens": { "access_token": "…", "refresh_token": "…", "expires_at": "2026-10-25T11:00:00.000Z",
+                "scope": "openid profile email offline_access" } }
+  ```
+
+  `tokens: null` = registered, not logged in. A file whose `url` is not the configured one is ignored and overwritten by the next login. Token values, codes, the verifier and `Authorization` values are never logged.
+- **CLI.** `tree-agent --mcp-login <server>` (no `OPENROUTER_API_KEY`, no session) runs the flow whatever the TTYs (the browser opens only on a TTY), ignoring cached tokens but reusing the registered client, and prints `logged in to "<server>" (<file>)`; Ctrl+C, a timeout, an `error=` callback or a token error → the message, exit 1. `tree-agent --mcp-logout <server>` deletes the file (§15).
 
 ### 10.3 Registration (`mcp/register.ts`) and the `codemode` tool
 
@@ -732,6 +762,8 @@ flags: --help | -h (usage on stdout, exit 0)
        --compact-at <ratio>
        --max-turns <n> (default 50) --no-mcp --no-skills
        --on-blocked stop|continue --cwd <dir> --trust
+tree-agent --mcp-login <server>         MCP login (§10.2.1); no OPENROUTER_API_KEY needed
+tree-agent --mcp-logout <server>        delete the server's mcp-auth/ token file
 exit codes: 0 completed · 1 error / max_turns · 2 blocked by permission (headless)
 ```
 
@@ -788,6 +820,7 @@ All on `FakeProvider` except the four marked *live* (skipped without `OPENROUTER
 | codemode | script calling two fake tools returns only `console.log` + return value; `tools.x` passes the gate (deny rejects the promise, ask pauses); `llm()` depth-1 has no tools; `maxCalls` and `maxTotalTokens` caps; depth 2 runs a sub-loop that can `read`; depth beyond config → script error; `Promise.all` respects `concurrency`; timeout kills the sandbox; no `fetch`/`require`. |
 | permissions | read-only never prompts; `session` answer skips later prompts for that tool; `ask` prompts on `bash`/`edit`/`write`/`codemode`/non-read-only MCP; `auto` allows `p(dangerous) < dangerThreshold` (0.29 at 0.3), prompts at `≥` (0.30) and on classifier failure; headless defaults to `auto` and TUI to `ask`; headless prompt → `deny` → exit 2; `--on-blocked continue`; audit entry written; cache hit. |
 | compaction | trigger at `triggerRatio`; `--compact-at 0.5` honoured; trigger re-evaluated after `/model`; cut never splits tool calls from results; summary merged on second compaction; overflow retry once; breaker after 3 failures; resumed session reconstructs `[summary][tail]` + activations. |
+| `mcp/auth.ts` | discovery from `resource_metadata` and the origin fallback; registration body (`token_endpoint_auth_method: "none"`, loopback `redirect_uri`, both grant types); authorize URL (every parameter, `resource` = the PRM value, scopes from the PRM/AS, S256 of the verifier); wrong `state` → 400, still waiting; the exchange sends `code_verifier` + `resource`; `expires_at` from `expires_in`; refresh keeps the old `refresh_token`; a failed refresh → `McpAuthRequired`; the 5-minute timeout (fake timers); the port rebound on re-login, re-registration only on `EADDRINUSE` / `invalid_client`; the file `0600` in a `0700` dir, atomic, ignored for another `url`; no token in any log line. Transport: a configured `Authorization` → no flow; bearer on every POST; 401 → refresh → one retry; second 401 → error. Client: the login outside the `initialize` timer (two `initialize`s); the headless skip (one warning). CLI: `--mcp-login` / `--mcp-logout` end to end against the fake AS; the TTY rule both ways. |
 | cli | mode resolution matrix (positional, stdin, `--json`, TTY); `--json` emits valid JSONL; exit codes; multi-line stdin → follow-ups. |
 
 ## 18. Milestones (dependency order, each "done when")

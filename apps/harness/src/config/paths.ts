@@ -8,6 +8,7 @@ export interface UserPaths {
   home: string;
   settings: string;
   mcp: string;
+  mcpAuth: string; // one OAuth token file per HTTP MCP server
   trusted: string;
   agentsMd: string;
   systemMd: string; // replaces the prompt preamble when present
@@ -24,6 +25,7 @@ export function userPaths(env: NodeJS.ProcessEnv = process.env): UserPaths {
     home,
     settings: join(home, "settings.json"),
     mcp: join(home, "mcp.json"),
+    mcpAuth: join(home, "mcp-auth"),
     trusted: join(home, "trusted.json"),
     agentsMd: join(home, "AGENTS.md"),
     systemMd: join(home, "SYSTEM.md"),

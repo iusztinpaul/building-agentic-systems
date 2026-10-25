@@ -4,10 +4,15 @@
 // carries frames as `data:` events, read with the provider's parser.
 // `Mcp-Session-Id` is kept when returned and echoed on every later
 // request, `MCP-Protocol-Version` once negotiated. A 404 on a session
-// means it expired: the transport counts as dropped.
+// means it expired: the transport counts as dropped. With `auth` (no
+// configured Authorization header), every POST carries the cached
+// bearer; a 401 refreshes it (unless a concurrent request already
+// did) and retries once, and a 401 that needs a login rejects with
+// McpAuthRequired (the client runs the login).
 
 import { log as defaultLog, type Logger } from "../log.ts";
 import { parseSse } from "../provider/sse.ts";
+import { type McpAuth, McpAuthRequired } from "./auth.ts";
 import type {
   JsonRpcMessage,
   Transport,
@@ -23,6 +28,7 @@ export interface HttpOptions {
   label?: string;
   log?: Logger;
   fetch?: typeof fetch;
+  auth?: McpAuth; // the MCP login of this server
 }
 
 export class HttpTransport implements Transport {
@@ -34,6 +40,7 @@ export class HttpTransport implements Transport {
   #handlers: TransportHandlers | undefined;
   #sessionId: string | undefined;
   #protocolVersion: string | undefined;
+  #bearer: string | undefined; // the MCP login's, last sent
 
   constructor(options: HttpOptions) {
     this.#o = options;
@@ -64,7 +71,10 @@ export class HttpTransport implements Transport {
     if (this.#protocolVersion) {
       headers.set("mcp-protocol-version", this.#protocolVersion);
     }
-    const res = await this.#post(headers, JSON.stringify(message));
+    const res = await this.#authorizedPost(
+      headers,
+      JSON.stringify(message),
+    );
     const session = res.headers.get("mcp-session-id");
     if (session) this.#sessionId = session;
     if (res.status === 404 && headers.has("mcp-session-id")) {
@@ -108,12 +118,48 @@ export class HttpTransport implements Transport {
     this.#sessionId = undefined;
   }
 
-  // The configured headers plus the session id; Headers normalises
-  // case, so a configured `Accept` cannot be sent twice.
+  // The configured headers plus the session id (and, for DELETE, the
+  // last bearer); Headers normalises case, so a configured `Accept`
+  // cannot be sent twice.
   #headers(): Headers {
     const headers = new Headers(this.#o.headers);
     if (this.#sessionId) headers.set("mcp-session-id", this.#sessionId);
+    if (this.#bearer)
+      headers.set("authorization", `Bearer ${this.#bearer}`);
     return headers;
+  }
+
+  // The bearer, then on a 401 one refresh + one retry; a second 401
+  // is returned (a plain HTTP 401 error), never retried again. A 401
+  // on a token another request has already replaced retries with the
+  // new one; concurrent refreshes share McpAuth's in-flight one.
+  async #authorizedPost(headers: Headers, body: string): Promise<Response> {
+    const auth = this.#o.auth;
+    if (!auth) return this.#post(headers, body);
+    const sent = await auth.token();
+    this.#bearer = sent;
+    if (sent) headers.set("authorization", `Bearer ${sent}`);
+    else headers.delete("authorization");
+    const res = await this.#post(headers, body);
+    if (res.status !== 401) return res;
+    const challenge = res.headers.get("www-authenticate") ?? "";
+    await res.body?.cancel();
+    let fresh: string | undefined;
+    if (sent) {
+      fresh = await auth.token();
+      if (fresh === sent) fresh = await auth.refresh();
+    }
+    if (fresh) {
+      this.#bearer = fresh;
+      headers.set("authorization", `Bearer ${fresh}`);
+      return this.#post(headers, body);
+    }
+    const error = new McpAuthRequired(
+      `${this.#label}HTTP 401: needs a login`,
+      challenge,
+    );
+    this.#handlers?.onClose(error); // the next call re-handshakes
+    throw error;
   }
 
   async #post(headers: Headers, body: string): Promise<Response> {

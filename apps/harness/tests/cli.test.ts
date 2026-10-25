@@ -26,6 +26,7 @@ import { discoverSkills } from "../src/skills/skills.ts";
 import type { AgentEvent, ToolCall } from "../src/types.ts";
 import { safe, verdict } from "./helpers/decisions.ts";
 import { fakeFetch, fixture, jsonResponse, sseResponse } from "./helpers/http.ts";
+import { type FakeOAuth, startFakeOAuth } from "./helpers/oauth-http.ts";
 import { FakeTerminal, settle } from "./helpers/terminal.ts";
 import { gone } from "./helpers/tmp.ts";
 
@@ -57,6 +58,9 @@ interface RunOptions {
   terminal?: FakeTerminal;
   discoverSkills?: CliDeps["discoverSkills"];
   startMcp?: CliDeps["startMcp"];
+  stderrIsTTY?: boolean; // default false: never the real process.stderr
+  openUrl?: CliDeps["openUrl"];
+  onStderr?: (text: string) => void;
 }
 
 async function run(
@@ -70,6 +74,9 @@ async function run(
     terminal,
     discoverSkills,
     startMcp,
+    stderrIsTTY = false,
+    openUrl,
+    onStderr,
   }: RunOptions = {},
 ) {
   const out: string[] = [];
@@ -87,8 +94,15 @@ async function run(
     terminal,
     discoverSkills,
     startMcp,
+    stderrIsTTY,
+    openUrl,
     stdout: { write: (t: string) => out.push(t) },
-    stderr: { write: (t: string) => err.push(t) },
+    stderr: {
+      write: (t: string) => {
+        err.push(t);
+        onStderr?.(t);
+      },
+    },
     createProvider: (apiKey) => {
       created.push(apiKey);
       return typeof provider === "function" ? provider() : provider;
@@ -1653,5 +1667,296 @@ describe("main (mcp)", () => {
 
     expect(result).toMatchObject({ code: 0, stderr: "" });
     expect(pids()).toHaveLength(1);
+  });
+});
+
+describe("main (MCP login)", () => {
+  let oauth: FakeOAuth;
+  beforeEach(async () => {
+    oauth = await startFakeOAuth();
+  });
+  afterEach(async () => {
+    await oauth.close();
+  });
+
+  const SERVER = fileURLToPath(new URL("./fixtures/fake-mcp-server.mjs", import.meta.url));
+  const tokenFile = () => join(home, "mcp-auth", "tree-memory.json");
+  const writeConfig = (servers: Record<string, unknown> = {}) =>
+    writeFileSync(
+      join(home, "mcp.json"),
+      JSON.stringify({
+        mcpServers: { "tree-memory": { type: "http", url: oauth.url }, ...servers },
+      }),
+    );
+  const cwd = () => {
+    const dir = join(home, "work");
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  };
+  // The browser: follows the authorize URL to the loopback callback.
+  const visits: Promise<Response>[] = [];
+  const browse = (url: string) => {
+    visits.push(oauth.browse(url));
+  };
+  const urlIn = (text: string) => /log in at (\S+)/.exec(text)?.[1];
+  const loginWarns = (warn: { mock: { calls: unknown[][] } }) =>
+    warn.mock.calls.map(([m]) => String(m)).filter((m) => m.includes("tree-memory"));
+
+  it("--help lists --mcp-login and --mcp-logout", async () => {
+    const result = await run(["--help"], new FakeProvider(), { key: "" });
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("--mcp-login <server>");
+    expect(result.stdout).toContain("--mcp-logout <server>");
+  });
+
+  it.each([
+    [["--mcp-login", "x"], { kind: "mcp-login", server: "x", trust: false }],
+    [
+      ["--mcp-logout", " x ", "--trust", "--cwd", "/w"],
+      { kind: "mcp-logout", server: "x", trust: true, cwd: "/w" },
+    ],
+  ])("resolveMode(%j) is its own mode, whatever stdin is", (argv, expected) => {
+    expect(resolveMode(argv, false, true)).toEqual({ cwd: undefined, ...expected });
+  });
+
+  it.each([
+    [["--mcp-login", " "], "--mcp-login needs a server name"],
+    [["--mcp-login", "a", "--mcp-logout", "a"], "use --mcp-login or --mcp-logout, not both"],
+  ])("%j is a usage error", (argv, error) => {
+    expect(resolveMode(argv, true, false)).toEqual({ kind: "usage", error });
+  });
+
+  it("--mcp-login with NO OPENROUTER_API_KEY, on a TTY: URL, browser, file, 'logged in', exit 0", async () => {
+    writeConfig();
+
+    const result = await run(["--mcp-login", "tree-memory"], new FakeProvider(), {
+      key: "",
+      stdin: tty,
+      stderrIsTTY: true,
+      openUrl: browse,
+    });
+
+    expect(result).toMatchObject({
+      code: 0,
+      stdout: `logged in to "tree-memory" (${tokenFile()})\n`,
+      created: [],
+    });
+    expect(result.stderr).toMatch(
+      /^mcp "tree-memory": log in at http:\/\/127\.0\.0\.1:\d+\/oauth2\/authorize\?response_type=code&/,
+    );
+    expect(result.stderr.split("\n")).toHaveLength(2);
+    expect((await visits[0])?.status).toBe(200);
+    const saved = JSON.parse(readFileSync(tokenFile(), "utf8"));
+    expect(saved.tokens.access_token).toBe(oauth.issued[0]);
+    expect(oauth.mcp.map((r) => r.body?.method)).toContain("tools/list");
+  });
+
+  it("--mcp-login without a TTY: no browser, the URL still printed, and the login completes", async () => {
+    writeConfig();
+    const opened = vi.fn();
+
+    const result = await run(["--mcp-login", "tree-memory"], new FakeProvider(), {
+      key: "",
+      stdin: piped(""),
+      openUrl: opened,
+      onStderr: (text) => {
+        const url = urlIn(text);
+        if (url) browse(url);
+      },
+    });
+
+    expect(result.code).toBe(0);
+    expect(opened).not.toHaveBeenCalled();
+    expect(result.stdout).toBe(`logged in to "tree-memory" (${tokenFile()})\n`);
+  });
+
+  it("--mcp-login: an unknown server, a stdio one and a static-header one", async () => {
+    writeConfig({
+      local: { command: process.execPath, args: [SERVER] },
+      keyed: { url: oauth.url, headers: { authorization: "Bearer fmcp_x" } },
+    });
+    const fake = new FakeProvider();
+
+    const unknown = await run(["--mcp-login", "nope"], fake, { key: "" });
+    const stdio = await run(["--mcp-login", "local"], fake, { key: "" });
+    const keyed = await run(["--mcp-login", "keyed"], fake, { key: "" });
+
+    expect(unknown).toMatchObject({
+      code: 1,
+      stderr: 'no MCP server "nope" in mcp.json; known: tree-memory, local, keyed\n',
+    });
+    expect(stdio).toMatchObject({ code: 1, stderr: '"local" is not an HTTP server in mcp.json\n' });
+    expect(keyed).toMatchObject({
+      code: 0,
+      stdout: '"keyed" uses a static Authorization header; nothing to log in to\n',
+    });
+    expect(oauth.mcp).toEqual([]);
+    expect(oauth.wellKnown).toEqual([]);
+  });
+
+  it("--mcp-login reads the project mcp.json only for a trusted cwd", async () => {
+    const dir = cwd();
+    mkdirSync(join(dir, ".tree-agent"));
+    writeFileSync(
+      join(dir, ".tree-agent", "mcp.json"),
+      JSON.stringify({ mcpServers: { proj: { url: oauth.url, headers: { Authorization: "x" } } } }),
+    );
+
+    const untrusted = await run(["--mcp-login", "proj", "--cwd", dir], new FakeProvider());
+    const trusted = await run(["--mcp-login", "proj", "--cwd", dir, "--trust"], new FakeProvider());
+
+    expect(untrusted).toMatchObject({ code: 1, stderr: expect.stringContaining("known: none") });
+    expect(trusted.code).toBe(0);
+  });
+
+  it("--mcp-login: an error= callback is the message and exit 1", async () => {
+    writeConfig();
+    oauth.denyNext();
+
+    const result = await run(["--mcp-login", "tree-memory"], new FakeProvider(), {
+      key: "",
+      stdin: tty,
+      stderrIsTTY: true,
+      openUrl: browse,
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toMatch(/\nmcp "tree-memory": login failed: The user declined\n$/);
+    expect(JSON.parse(readFileSync(tokenFile(), "utf8")).tokens).toBeNull();
+  });
+
+  it("--mcp-login: Ctrl+C at the browser step exits 1 and keeps the client (tokens: null)", async () => {
+    writeConfig();
+    const signals = new EventEmitter();
+
+    const result = await run(["--mcp-login", "tree-memory"], new FakeProvider(), {
+      key: "",
+      signals,
+      onStderr: (text) => {
+        if (urlIn(text)) setImmediate(() => signals.emit("SIGINT"));
+      },
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toMatch(/\nmcp "tree-memory": login cancelled\n$/);
+    expect(JSON.parse(readFileSync(tokenFile(), "utf8"))).toMatchObject({
+      client: { client_id: "client-1" },
+      tokens: null,
+    });
+    expect(signals.listenerCount("SIGINT")).toBe(0);
+  });
+
+  it("--mcp-logout deletes the file, then reports not logged in; both exit 0", async () => {
+    writeConfig();
+    await run(["--mcp-login", "tree-memory"], new FakeProvider(), {
+      key: "",
+      stdin: tty,
+      stderrIsTTY: true,
+      openUrl: browse,
+    });
+
+    const first = await run(["--mcp-logout", "tree-memory"], new FakeProvider(), { key: "" });
+    const second = await run(["--mcp-logout", "tree-memory"], new FakeProvider(), { key: "" });
+
+    expect(first).toEqual({
+      code: 0,
+      stdout: `logged out of "tree-memory" (${tokenFile()})\n`,
+      stderr: "",
+      created: [],
+    });
+    expect(existsSync(tokenFile())).toBe(false);
+    expect(second).toMatchObject({ code: 0, stdout: 'not logged in to "tree-memory"\n' });
+  });
+
+  it("headless, piped stdin, not logged in: one warning naming --mcp-login, the answer, exit 0", async () => {
+    writeConfig();
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+    const opened = vi.fn();
+    const fake = new FakeProvider({ streams: [textTurn("ok")] });
+
+    const result = await run(["--cwd", cwd()], fake, {
+      stdin: piped("say ok\n"),
+      stderrIsTTY: true,
+      openUrl: opened,
+    });
+
+    expect(result).toMatchObject({ code: 0, stdout: "ok\n", stderr: "" });
+    expect(loginWarns(warn)).toEqual([
+      'mcp "tree-memory": needs a login; run tree-agent --mcp-login tree-memory once, then re-run',
+    ]);
+    expect(opened).not.toHaveBeenCalled();
+    expect(oauth.registrations).toEqual([]);
+  });
+
+  it("headless --json with a non-TTY stderr: the warning stays off stdout, which is valid JSONL", async () => {
+    writeConfig();
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+    const fake = new FakeProvider({ streams: [textTurn("ok")] });
+
+    const result = await run(["say ok", "--json", "--cwd", cwd()], fake, { stdin: tty });
+
+    expect(result.code).toBe(0);
+    const events = result.stdout
+      .trimEnd()
+      .split("\n")
+      .map((l) => JSON.parse(l) as AgentEvent);
+    expect(events.at(-1)).toEqual({ type: "agent_end", reason: "completed" });
+    expect(loginWarns(warn)).toHaveLength(1);
+  });
+
+  it("TTY stdin and stderr: the URL line, the wait, then the run uses the server; a later run is silent", async () => {
+    writeConfig();
+    const fake = new FakeProvider({ streams: [textTurn("ok"), textTurn("again")] });
+
+    const first = await run(["say ok", "--cwd", cwd()], fake, {
+      stdin: tty,
+      stderrIsTTY: true,
+      openUrl: browse,
+    });
+    const second = await run(["again", "--cwd", cwd()], fake, {
+      stdin: piped(""),
+      openUrl: browse,
+    });
+
+    expect(first).toMatchObject({ code: 0, stdout: "ok\n" });
+    expect(first.stderr).toMatch(/^mcp "tree-memory": log in at http:\/\/127\.0\.0\.1:\d+\//);
+    expect(fake.requests[0]?.context.system).toContain("- tree-memory: 2 tools");
+    expect(second).toMatchObject({ code: 0, stdout: "again\n", stderr: "" });
+    expect(oauth.authorizations).toHaveLength(1);
+    expect(fake.requests[1]?.context.system).toContain("- tree-memory: 2 tools");
+  });
+
+  it("no token, code, code_verifier or Authorization value in any log call or stderr line", async () => {
+    writeConfig();
+    const logged: string[] = [];
+    for (const level of ["debug", "info", "warn", "error"] as const) {
+      vi.spyOn(log, level).mockImplementation((m: string) => {
+        logged.push(m);
+      });
+    }
+    const login = await run(["--mcp-login", "tree-memory"], new FakeProvider(), {
+      key: "",
+      stdin: tty,
+      stderrIsTTY: true,
+      openUrl: browse,
+      env: { TREE_AGENT_LOG: "debug" },
+    });
+    oauth.expireAccessToken(); // the next run refreshes
+    const fake = new FakeProvider({ streams: [textTurn("ok")] });
+    const later = await run(["say ok", "--cwd", cwd()], fake, { env: { TREE_AGENT_LOG: "debug" } });
+
+    expect([login.code, later.code]).toEqual([0, 0]);
+    expect(oauth.tokenRequests.map((r) => r.grant_type)).toEqual([
+      "authorization_code",
+      "refresh_token",
+    ]);
+    const secrets = [
+      ...oauth.issued,
+      ...oauth.tokenRequests.flatMap((r) => [r.code, r.code_verifier, r.refresh_token]),
+    ].filter(Boolean) as string[];
+    const seen = [...logged, login.stderr, later.stderr].join("\n");
+    expect(logged.length).toBeGreaterThan(0);
+    for (const secret of secrets) expect(seen).not.toContain(secret);
   });
 });

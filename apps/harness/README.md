@@ -12,7 +12,7 @@ What you get:
 - compaction by summarisation at a ratio of the context window;
 - append-only JSONL sessions you can resume.
 
-Not built, on purpose: subagents, plan mode, session forks, an extensions API, MCP OAuth / resources / prompts, permission rule files.
+Not built, on purpose: subagents, plan mode, session forks, an extensions API, MCP resources / prompts, permission rule files.
 
 The contract is the spec, [`docs/notes/tree-agent-harness-spec.md`](../../docs/notes/tree-agent-harness-spec.md); the architectural decisions are [ADR-016](../../docs/adrs/016_tree_agent_harness.md). This README describes what the code does today; where it differs from the spec, the code is what is documented. The harness reaches memory only through MCP (ADR-008 §5): nothing here imports `apps/memory`.
 
@@ -71,6 +71,8 @@ flags: --help | -h (this text)
        --permission-mode ask|auto (TUI: settings, ask; headless: auto)
        --on-blocked stop|continue (headless deny: exit 2, or go on)
        --compact-at <ratio> (0.3–0.95; compact at ratio × context)
+       --mcp-login <server> (OAuth login to an HTTP MCP server)
+       --mcp-logout <server> (delete its mcp-auth/ token file)
 ```
 
 ### Modes
@@ -103,6 +105,8 @@ A positional prompt wins over stdin. Headless text mode prints each final answer
 | `--json` | off | headless JSONL event stream on stdout; alone, with no prompt and no stdin, it prints usage |
 | `--no-skills` | off | no skill discovery, no `skills` prompt section, `/skill:` answers "skills are disabled" |
 | `--no-mcp` | off | no `mcp.json` read, no server started, so no `tool_search` and no `codemode` tool |
+| `--mcp-login <server>` | — | the [MCP login](#the-hosted-tree-memory-server) for an HTTP server of `mcp.json` (user, plus project for a trusted cwd / `--trust`); needs no `OPENROUTER_API_KEY`; prints the URL on stderr, opens the browser on a TTY, waits ≤ 5 min, prints `logged in to "<server>" (<file>)`, exit 0. Unknown or stdio server, timeout, Ctrl+C or a refused login: exit 1. A server with a configured `Authorization` header: "nothing to log in to", exit 0. |
+| `--mcp-logout <server>` | — | delete `mcp-auth/<server>.json` (`logged out of …`, or `not logged in to …`), exit 0 |
 
 ### Exit codes
 
@@ -138,6 +142,7 @@ User-level state lives in `~/.tree-agent/`, or in `$TREE_AGENT_HOME` when set. P
 |---|---|
 | `settings.json` | settings (below) |
 | `mcp.json` | user MCP servers (see [MCP](#mcp)) |
+| `mcp-auth/<server>.json` | OAuth tokens and client registration per HTTP MCP server (0600) |
 | `trusted.json` | JSON array of trusted absolute directories |
 | `AGENTS.md` | user context file, always injected |
 | `SYSTEM.md` | replaces the prompt preamble when present |
@@ -203,9 +208,11 @@ Sources, merged by server name (the later file replaces a server whole): `~/.tre
 
 ```ts
 const McpServer = z.union([
-  z.object({ command: z.string(), args: z.string().array().default([]),
+  z.object({ type: z.literal("stdio").optional(),
+             command: z.string(), args: z.string().array().default([]),
              env: z.record(z.string()).default({}) }),                  // stdio
-  z.object({ url: z.string().url(),
+  z.object({ type: z.literal("http").optional(),
+             url: z.string().url(),
              headers: z.record(z.string()).default({}) }),              // streamable HTTP
 ]).and(z.object({
   // glob → exposure, first match in declaration order wins; unmatched: codemode
@@ -214,9 +221,9 @@ const McpServer = z.union([
 export const McpConfig = z.object({ mcpServers: z.record(McpServer) });
 ```
 
-- A server with both `command` and `url` is an error. Globs support `*` only and are case-sensitive.
+- A server with both `command` and `url` is an error, and so is a `type` that does not match its transport (`"sse"`, or `"stdio"` with a `url`): `type must be http or stdio`. Globs support `*` only and are case-sensitive.
 - stdio children start in the session cwd and inherit its environment plus `env`. HTTP adds `Accept: application/json, text/event-stream` and echoes `Mcp-Session-Id`.
-- Timeouts: `initialize` 30 s (`mcp.initializeTimeoutMs`), every other call 60 s. Only `initialize`, `tools/list` (paginated) and `tools/call` are used; no OAuth, no resources or prompts.
+- Timeouts: `initialize` 30 s (`mcp.initializeTimeoutMs`), every other call 60 s. Only `initialize`, `tools/list` (paginated) and `tools/call` are used; OAuth 2.1 for HTTP servers (below), no resources or prompts.
 - Tools register as `mcp__<server>__<tool>`. The server segment is sanitised to `^[a-z][a-z0-9_]*$` (lowercased, other characters → `_`), so `tree-memory-local` becomes `tree_memory_local` and every tool is a valid `tools.<name>` property in scripts.
 - `/mcp` in the TUI lists each configured server with its tool counts per exposure and its connection state.
 
@@ -259,20 +266,30 @@ The memory server's tools declare no `readOnlyHint`, so the gate treats them as 
 
 ### The hosted `tree-memory` server
 
-The hosted server is not committed: it sits behind Prefect Horizon OAuth, and the harness has no OAuth flow. Once you have a bearer token, add it to your user file `~/.tree-agent/mcp.json`:
+The hosted server sits behind Prefect Horizon OAuth. Add it to your user file `~/.tree-agent/mcp.json`
+(it is not committed to the repo's `.tree-agent/mcp.json`: a repo-root run by someone not logged in
+would warn or wait every time, and its tools would duplicate `tree-memory-local`'s):
 
 ```json
-{
-  "mcpServers": {
-    "tree-memory": {
-      "url": "https://tree-memory.fastmcp.app/mcp",
-      "headers": { "Authorization": "Bearer <token>" }
-    }
-  }
-}
+{ "mcpServers": { "tree-memory": { "type": "http", "url": "https://tree-memory.fastmcp.app/mcp",
+  "toolExposure": { "search_memory": "direct", "visualize_*": "deferred" } } } }
 ```
 
-Its tools register as `mcp__tree_memory__*` and default to `codemode`; add a `toolExposure` map to promote them.
+`tree-agent` follows the MCP authorization flow: on the server's 401 it discovers the authorization
+server, registers itself once, and opens your browser (printing the URL on stderr as well) for a
+one-time Horizon login; the token and the registered client are stored in
+`~/.tree-agent/mcp-auth/tree-memory.json` (mode 0600) and refreshed silently afterwards. Log in once
+with `tree-agent --mcp-login tree-memory` (no `OPENROUTER_API_KEY` needed); every later run — TUI or
+headless — reuses the token. Headless runs without a terminal (piped stdin, CI) never wait for a login:
+a server that needs one is skipped with `mcp "tree-memory": needs a login; run tree-agent --mcp-login
+tree-memory once, then re-run`. The interactive wait is bounded at 5 minutes. Log out with
+`tree-agent --mcp-logout tree-memory` (it deletes the file). Its tools register as
+`mcp__tree_memory__*`.
+
+A static token also works and disables the flow: `"headers": {"Authorization": "Bearer <token>"}`. A
+personal Horizon API key (`fmcp_…`) is reported to work as that bearer (`apps/memory/src/tree/mcp/
+client.py`); this is unverified from the harness — `.env.example` describes the key as a platform
+credential, not a client one. Never commit a token.
 
 ## Permissions
 
