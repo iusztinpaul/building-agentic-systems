@@ -1,5 +1,13 @@
 {
   "mcpServers": {
+    "tree-memory": {
+      "type": "http",
+      "url": "https://tree-memory.fastmcp.app/mcp",
+      "toolExposure": {
+        "search_memory": "direct",
+        "visualize_*": "deferred"
+      }
+    },
     "tree-memory-local": {
       "command": "uv",
       "args": [
