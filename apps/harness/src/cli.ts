@@ -18,6 +18,7 @@ import {
 } from "./config/settings.ts";
 import { isTrusted, trustDirectory } from "./config/trust.ts";
 import { type Out, runHeadless, type Signals } from "./headless/print.ts";
+import { type Logger, log } from "./log.ts";
 import { hasAuthorization, type LoginUi, openBrowser } from "./mcp/auth.ts";
 import {
   authFilePath,
@@ -35,7 +36,7 @@ import { SessionStore } from "./session-store/jsonl.ts";
 import type { DiscoverSkills } from "./skills/skills.ts";
 import { builtinRegistry } from "./tools/builtins.ts";
 import { registerToolSearch } from "./tools/tool-search.ts";
-import { runTui } from "./tui/app.ts";
+import { runTui, type StartupUi } from "./tui/app.ts";
 import type { PermissionMode, PermissionPrompter } from "./types.ts";
 
 export const DEFAULT_MAX_TURNS = 50;
@@ -182,9 +183,11 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
     const resumeId = args.continue ? store.list(cwd)[0]?.id : args.resume;
     const resume = resumeId ? store.load(resumeId) : undefined;
 
+    // `screen`: the TUI's, which shows the login and the warnings.
     const open = async (
       trustNow: boolean,
       prompter: PermissionPrompter | null,
+      screen?: StartupUi,
     ): Promise<AgentSession> => {
       if (trustNow) await trustDirectory(cwd, env);
       const projectTrusted = trusted || trustNow;
@@ -211,9 +214,13 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
           cwd,
           trusted: projectTrusted,
           initializeTimeoutMs: settings.mcp.initializeTimeoutMs,
-          login: interactive ? loginUi(deps, true) : undefined,
+          login: interactive ? loginUi(deps, true, screen) : undefined,
+          signal: screen?.signal, // Ctrl+C: no handshake waited for
+          ...(screen && { log: screenLog(screen) }),
         });
         mcpClients.push(...clients);
+        // Ctrl+C on the TUI's startup screen: no session.
+        if (screen?.signal.aborted) throw new Error("cancelled");
         // Before create(): a resumed session re-activates by name.
         mcpServers = registerMcpTools(tools, clients, { tmpDir });
         registerToolSearch(tools);
@@ -371,12 +378,31 @@ async function mcpAuthCommand(
   return 0;
 }
 
-// The URL always goes to stderr (the TUI is not up yet); the
-// browser opens only when there is a terminal to come back to.
-function loginUi(deps: CliDeps, browser: boolean): LoginUi {
+// The URL goes to the TUI's screen while it is up, else to stderr;
+// the browser opens only when there is a terminal to come back to.
+// The screen's Ctrl+C cancels the wait.
+function loginUi(
+  deps: CliDeps,
+  browser: boolean,
+  screen?: StartupUi,
+): LoginUi {
   return {
-    notify: (line) => deps.stderr.write(`${line}\n`),
+    notify: (line) => {
+      if (!screen?.notify(line)) deps.stderr.write(`${line}\n`);
+    },
     open: browser ? (deps.openUrl ?? openBrowser) : undefined,
+    signal: screen?.signal,
+  };
+}
+
+// The MCP clients' warnings (a login's timeout, a skipped server) go
+// to the TUI's screen while it is up: stderr is under it.
+function screenLog(screen: StartupUi): Logger {
+  return {
+    ...log,
+    warn: (message) => {
+      if (!screen.notify(message, true)) log.warn(message);
+    },
   };
 }
 

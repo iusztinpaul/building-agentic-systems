@@ -9,7 +9,7 @@ import type { ChatRequest, Provider, StreamEvent } from "../../src/provider/type
 import { AgentSession, type SessionOptions } from "../../src/session.ts";
 import { SessionStore } from "../../src/session-store/jsonl.ts";
 import { builtinRegistry } from "../../src/tools/builtins.ts";
-import { runTui } from "../../src/tui/app.ts";
+import { runTui, type StartupUi } from "../../src/tui/app.ts";
 import type { AgentEvent } from "../../src/types.ts";
 import { verdict } from "../helpers/decisions.ts";
 import { FakeTerminal, settle } from "../helpers/terminal.ts";
@@ -511,6 +511,88 @@ describe("runTui", () => {
       type: "agent_end",
       reason: "aborted",
     });
+  });
+
+  it("shows open()'s login line on screen while it waits; Ctrl+C ends the wait, exit 1, terminal restored", async () => {
+    const terminal = new FakeTerminal();
+    let tui: TUI | undefined;
+    const notified: boolean[] = [];
+    let cancelled = false;
+    const line = 'mcp "tree-memory": log in at http://127.0.0.1:5/oauth2/authorize?state=s';
+    const exit = runTui({
+      terminal,
+      cwd: "/",
+      askTrust: false, // a trusted cwd: nothing else was ever focused
+      // As cli.ts: the login waits on the signal, then open() throws.
+      open: (_trust, _prompter, ui) =>
+        new Promise((_, reject) => {
+          notified.push(ui.notify(line));
+          ui.signal.addEventListener("abort", () => {
+            cancelled = true;
+            reject(new Error('mcp "tree-memory": login cancelled'));
+          });
+        }),
+      onStart: (t) => {
+        tui = t;
+      },
+    });
+    lastScreen = () => (tui?.render(100) ?? []).map((l) => stripTerminalSequences(l)).join("\n");
+    await until(() => lastScreen().includes("log in at"));
+
+    expect(lastScreen()).toContain("starting… (Ctrl+C quits)");
+    expect(lastScreen().replace(/\s+/g, "")).toContain(line.replace(/\s+/g, ""));
+    terminal.send("\x03");
+
+    expect(await exit).toBe(1);
+    expect(cancelled).toBe(true);
+    expect(notified).toEqual([true]);
+    expect(terminal.stopped).toBe(true);
+  });
+
+  it("keeps startup lines in the transcript and shows later ones as notices; off screen once it stops", async () => {
+    const home = join(root(), "home");
+    let ui: StartupUi | undefined;
+    let tui: TUI | undefined;
+    const terminal = new FakeTerminal();
+    const exit = runTui({
+      terminal,
+      cwd: "/",
+      askTrust: false,
+      open: async (_trust, prompter, startup) => {
+        ui = startup;
+        startup.notify('mcp "tree-memory": login timed out after 5 min', true);
+        return AgentSession.create({
+          provider: new FakeProvider(),
+          model: "test/model",
+          tools: builtinRegistry({ tmpDir: join(home, "tmp") }),
+          cwd: "/",
+          maxTurns: 5,
+          trusted: false,
+          contextMaxChars: 40_000,
+          env: { TREE_AGENT_HOME: home },
+          prompter,
+        });
+      },
+      onStart: (t) => {
+        tui = t;
+      },
+    });
+    const screen = () => (tui?.render(100) ?? []).map((l) => stripTerminalSequences(l).trim());
+    lastScreen = () => screen().join("\n");
+    await until(() => screen().some((l) => l.includes(" · 0 MCP · ")));
+
+    expect(screen()).toContain('mcp "tree-memory": login timed out after 5 min');
+    // A warning is red; a login line is not.
+    const raw = (text: string) => tui?.render(100).find((l) => l.includes(text)) ?? "";
+    expect(raw("login timed out")).toContain("\x1b[31m");
+    expect(lastScreen()).not.toContain("starting…");
+    expect(ui?.notify('mcp "tree-memory": log in at http://127.0.0.1:5/a')).toBe(true);
+    await until(() => screen().includes('mcp "tree-memory": log in at http://127.0.0.1:5/a'));
+    expect(raw("log in at")).not.toContain("\x1b[31m");
+    terminal.send("\x03");
+
+    expect(await exit).toBe(0);
+    expect(ui?.notify("late")).toBe(false);
   });
 
   it("restores the terminal and rethrows when the session cannot open", async () => {

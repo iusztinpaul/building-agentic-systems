@@ -220,7 +220,7 @@ no text, and cost ≈ $0.00002 per danger check (input billed at $0.042 per mill
 `auto` classifier alone, through a new `Provider.decisions()` on the same raw `fetch`; the classifier asks
 two questions (`dangerous` noul, `risk` choice) and flags `dangerous` when `p ≥
 permissions.dangerThreshold` (default 0.3 — the spec's "when unsure, dangerous" read as a probability;
-live safe calls score 0.01–0.02, destructive ones 0.95–0.99 on both tested models). A new
+live safe calls score 0.01–0.02, destructive ones 0.87–0.99 on both tested models). A new
 `settings.smallModel` (default `anthropic/claude-haiku-5.5`, must support `structured_outputs`) takes the
 text/JSON-schema jobs: the compaction summary through `decide<T>()` and the sandbox `llm()` default. Two
 primitives, one per output kind: `decide<T>()` for structured JSON on a chat model, `decisions()` for
@@ -239,15 +239,16 @@ with `WWW-Authenticate … resource_metadata`, RFC 9728 protected-resource metad
 same origin with dynamic registration, PKCE S256 and `authorization_code` + `refresh_token` — and the
 owner runs it from the plain `{"type": "http", "url": …}` entry in other clients. "A second MCP client
 need (resources, OAuth) → revisit the SDK" (Consequences) is therefore revisited. **Decision:** implement
-the MCP authorization spec (2025-06-18) by hand in `mcp/auth.ts` (~300 lines, stdlib only: `crypto`,
-`http` for the loopback redirect, `fetch`), not with `@modelcontextprotocol/sdk` — the SDK's `auth()`
-still needs a caller-written `OAuthClientProvider` of comparable size, is shaped for the SDK's own
-transports, and would hang its dependency tree under a transport the chapter lists as "no SDK". Tokens
-and the registered client live in `$TREE_AGENT_HOME/mcp-auth/<server>.json` (0600), never in `mcp.json`
-or the repo; a configured `Authorization` header always wins and disables the flow. The interactive
-step (URL + browser + wait, 5 min) runs only on a TTY or under `tree-agent --mcp-login <server>`;
-headless runs without a TTY skip the server with one warning, so CI never hangs. The login runs outside
-the `initialize` timer. The hosted server is a user-level `~/.tree-agent/mcp.json` entry, NOT committed
-to `.tree-agent/mcp.json`: a repo-root run by anyone not logged in would otherwise warn (or wait) every
-time, and its tools would duplicate `tree-memory-local`'s. *Upgrade trigger:* a second OAuth server with
-an AS quirk the flow cannot absorb, or MCP resources/prompts entering scope → the SDK.
+the MCP authorization spec (2025-06-18) by hand in `mcp/auth.ts` (~650 lines (`mcp/auth.ts` +
+`mcp/auth-store.ts`), no new dependency: `crypto`, `http`, `fetch` and the already-installed `zod`), not
+with `@modelcontextprotocol/sdk` — the SDK's `auth()` still needs a caller-written `OAuthClientProvider`
+of comparable size, is shaped for the SDK's own transports, and would hang its dependency tree under a
+transport the chapter lists as "no SDK". Tokens and the registered client live in
+`$TREE_AGENT_HOME/mcp-auth/<server>.json` (0600), never in `mcp.json` or the repo; a configured
+`Authorization` header always wins and disables the flow. The interactive step (URL + browser + wait,
+5 min) runs only on a TTY or under `tree-agent --mcp-login <server>`; headless runs without a TTY skip
+the server with one warning, so CI never hangs. The login runs outside the `initialize` timer. The hosted
+server is a user-level `~/.tree-agent/mcp.json` entry, NOT committed to `.tree-agent/mcp.json`: a
+repo-root run by anyone not logged in would otherwise warn (or wait) every time, and its tools would
+duplicate `tree-memory-local`'s. *Upgrade trigger:* a second OAuth server with an AS quirk the flow
+cannot absorb, or MCP resources/prompts entering scope → the SDK.

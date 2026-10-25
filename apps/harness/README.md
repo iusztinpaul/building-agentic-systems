@@ -105,7 +105,7 @@ A positional prompt wins over stdin. Headless text mode prints each final answer
 | `--json` | off | headless JSONL event stream on stdout; alone, with no prompt and no stdin, it prints usage |
 | `--no-skills` | off | no skill discovery, no `skills` prompt section, `/skill:` answers "skills are disabled" |
 | `--no-mcp` | off | no `mcp.json` read, no server started, so no `tool_search` and no `codemode` tool |
-| `--mcp-login <server>` | — | the [MCP login](#the-hosted-tree-memory-server) for an HTTP server of `mcp.json` (user, plus project for a trusted cwd / `--trust`); needs no `OPENROUTER_API_KEY`; prints the URL on stderr, opens the browser on a TTY, waits ≤ 5 min, prints `logged in to "<server>" (<file>)`, exit 0 — also when the `initialize` after the stored login fails (one warning on stderr). Unknown or stdio server, timeout, Ctrl+C or a refused login: exit 1. A server with a configured `Authorization` header: "nothing to log in to", exit 0. |
+| `--mcp-login <server>` | — | the [MCP login](#the-hosted-tree-memory-server) for an HTTP server of `mcp.json` (user, plus project for a trusted cwd / `--trust`); needs no `OPENROUTER_API_KEY`; prints the URL on stderr, opens the browser on a TTY, waits ≤ 5 min, prints `logged in to "<server>" (<file>)`, exit 0 — also when the `initialize` after the stored login fails (one warning on stderr). A server that answers `initialize` without a 401: `"<server>" did not ask for a login`, exit 0. Unknown or stdio server, timeout, Ctrl+C or a refused login: exit 1. A server with a configured `Authorization` header: "nothing to log in to", exit 0. |
 | `--mcp-logout <server>` | — | delete `mcp-auth/<server>.json` (`logged out of …`, or `not logged in to …`), exit 0 |
 
 ### Exit codes
@@ -113,7 +113,7 @@ A positional prompt wins over stdin. Headless text mode prints each final answer
 | Code | Meaning |
 |---|---|
 | 0 | completed (TUI: `/exit`, or Ctrl+C while idle), or `--help` |
-| 1 | error, usage error, `max_turns`, an unusable `/skill:` line, or a headless run aborted by Ctrl+C / SIGTERM |
+| 1 | error, usage error, `max_turns`, an unusable `/skill:` line, a headless run aborted by Ctrl+C / SIGTERM, or Ctrl+C in the TUI before the session opened (`starting…`, e.g. during an MCP login) |
 | 2 | headless run blocked by the permission gate (`--on-blocked stop`) |
 | 130 / 143 | a second Ctrl+C / SIGTERM during a headless run: Node's default exit; MCP children are killed |
 
@@ -130,7 +130,7 @@ Built on [`@earendil-works/pi-tui`](https://www.npmjs.com/package/@earendil-work
 | `Esc` | abort the current run |
 | `Tab` (empty input) | expand / collapse tool results |
 | `Shift+Tab` | toggle the permission mode `ask` ↔ `auto` |
-| `Ctrl+C` | abort the run; when idle, quit |
+| `Ctrl+C` | abort the run; when idle, quit; while the session opens (`starting…`), quit with exit 1 |
 
 Slash commands: `/help`, `/model <id>`, `/compact [instructions]`, `/mode ask|auto`, `/tools`, `/mcp`, `/reload` (re-read `SYSTEM.md`, context files and skills), `/clear` (new session), `/exit`, `/skill:<name> [args]`. `/model`, `/clear` and `/compact` are refused while a prompt runs.
 
@@ -276,17 +276,17 @@ would warn or wait every time, and its tools would duplicate `tree-memory-local`
 ```
 
 `tree-agent` follows the MCP authorization flow: on the server's 401 it discovers the authorization
-server, registers itself once, and opens your browser (printing the URL on stderr as well) for a
-one-time Horizon login; the token and the registered client are stored in
-`~/.tree-agent/mcp-auth/tree-memory.json` (mode 0600) and refreshed silently afterwards. Log in once
-with `tree-agent --mcp-login tree-memory` (no `OPENROUTER_API_KEY` needed); every later run — TUI or
-headless — reuses the token. The first request after idle can take tens of seconds while Horizon
-cold-starts the server (hence the 60 s `mcp.initializeTimeoutMs` default). Headless runs without a terminal (piped stdin, CI) never wait for a login:
-a server that needs one is skipped with `mcp "tree-memory": needs a login; run tree-agent --mcp-login
-tree-memory once, then re-run`. The interactive wait is bounded at 5 minutes. Log out with
+server, registers itself once, and opens your browser (printing the URL as well: on stderr, or in the
+TUI on its screen, where Ctrl+C quits the wait) for a one-time Horizon login; the token and the
+registered client are stored in `~/.tree-agent/mcp-auth/tree-memory.json` (mode 0600) and refreshed
+silently afterwards. Log in once with `tree-agent --mcp-login tree-memory` (no `OPENROUTER_API_KEY`
+needed); every later run — TUI or headless — reuses the token. The first request after idle can take
+tens of seconds while Horizon cold-starts the server (hence the 60 s `mcp.initializeTimeoutMs`
+default). Headless runs without a terminal (piped stdin, CI) never wait for a login: a server that
+needs one is skipped with `mcp "tree-memory": needs a login; run tree-agent --mcp-login tree-memory
+once, then re-run`. The interactive wait is bounded at 5 minutes. Log out with
 `tree-agent --mcp-logout tree-memory` (it deletes the file). Its tools register as
 `mcp__tree_memory__*`.
-
 A static token also works and disables the flow: `"headers": {"Authorization": "Bearer <token>"}`. A
 personal Horizon API key (`fmcp_…`) is reported to work as that bearer (`apps/memory/src/tree/mcp/
 client.py`); this is unverified from the harness — `.env.example` describes the key as a platform

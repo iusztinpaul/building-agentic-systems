@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type CliDeps, main, resolveMode, type Stdin } from "../src/cli.ts";
 import { log } from "../src/log.ts";
@@ -1501,6 +1502,8 @@ describe("main (mcp)", () => {
     await run(["hi", "--cwd", project()], fake, { startMcp: spy });
 
     expect(spy.mock.calls.map(([o]) => o.initializeTimeoutMs)).toEqual([60_000, 90_000]);
+    // Headless: nothing to Ctrl+C a handshake from, waits as before.
+    expect(spy.mock.calls.map(([o]) => o.signal)).toEqual([undefined, undefined]);
   });
 
   it("a url without a scheme: one line naming the server and the key, exit 1", async () => {
@@ -1957,6 +1960,104 @@ describe("main (MCP login)", () => {
     expect(second).toMatchObject({ code: 0, stdout: "again\n", stderr: "" });
     expect(oauth.authorizations).toHaveLength(1);
     expect(fake.requests[1]?.context.system).toContain("- tree-memory: 2 tools");
+  });
+
+  // The TUI on a trusted cwd: the screen is what terminal.written holds.
+  const tuiRun = (o: { stderrIsTTY: boolean; openUrl: CliDeps["openUrl"] }) => {
+    const terminal = new FakeTerminal();
+    const fake = new FakeProvider({ streams: [] });
+    const result = run(["--cwd", cwd(), "--trust"], fake, { stdin: tty, terminal, ...o });
+    const screen = () => stripTerminalSequences(terminal.written.join(""));
+    const shown = async (text: string) => {
+      for (let i = 0; i < 150 && !screen().includes(text); i++) await settle(20);
+      expect(screen()).toContain(text);
+    };
+    return { terminal, result, screen, shown };
+  };
+
+  it("TUI, not logged in: the login URL is on the screen (not stderr), the browser opens, the session gets the server", async () => {
+    writeConfig();
+    const opened: string[] = [];
+
+    const t = tuiRun({
+      stderrIsTTY: true,
+      openUrl: (url) => {
+        opened.push(url);
+        browse(url);
+      },
+    });
+    await t.shown('mcp "tree-memory": log in at');
+    await t.shown(" · 1 MCP · ");
+    t.terminal.send("\x03");
+
+    expect(await t.result).toMatchObject({ code: 0, stderr: "" });
+    expect(opened).toHaveLength(1);
+    expect(t.screen().replace(/\s+/g, "")).toContain(opened[0]?.slice(0, 60));
+    expect(oauth.issued).toHaveLength(1);
+  });
+
+  it("TUI: Ctrl+C while the login waits ends it — 'login cancelled' on screen, exit 1, terminal restored", async () => {
+    writeConfig();
+
+    const t = tuiRun({ stderrIsTTY: true, openUrl: () => {} });
+    await t.shown("log in at");
+    expect(t.screen()).toContain("starting… (Ctrl+C quits)");
+    t.terminal.send("\x03");
+
+    expect(await t.result).toMatchObject({ code: 1, stderr: "" });
+    expect(t.terminal.stopped).toBe(true);
+    // The last frame, drawn before the terminal was restored.
+    expect(t.screen()).toContain('mcp "tree-memory": login cancelled');
+    expect(t.screen()).toContain("quitting…");
+    expect(JSON.parse(readFileSync(tokenFile(), "utf8")).tokens).toBeNull();
+  });
+
+  it("TUI: Ctrl+C while one server logs in and another hangs in initialize (20 s): exit 1 within 1 s, no child left", async () => {
+    const pidFile = join(home, "hung.pid");
+    writeConfig({
+      hung: {
+        command: process.execPath,
+        args: [
+          "-e",
+          `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));` +
+            "process.stdin.resume(); process.stdin.on('end', () => process.exit(0))",
+        ],
+      },
+    });
+    writeFileSync(
+      join(home, "settings.json"),
+      JSON.stringify({ mcp: { initializeTimeoutMs: 20_000 } }),
+    );
+
+    const t = tuiRun({ stderrIsTTY: true, openUrl: () => {} });
+    await t.shown("log in at");
+    for (let i = 0; i < 100 && !existsSync(pidFile); i++) await settle(20);
+    const t0 = performance.now();
+    t.terminal.send("\x03");
+    const result = await t.result;
+    const ms = performance.now() - t0;
+
+    expect(result).toMatchObject({ code: 1, stderr: "" });
+    expect(ms).toBeLessThan(1_000);
+    expect(t.terminal.stopped).toBe(true);
+    expect(t.screen()).toContain('mcp "tree-memory": login cancelled');
+    expect(t.screen()).toContain('mcp "hung": connect cancelled');
+    expect(await gone(Number(readFileSync(pidFile, "utf8")))).toBe(true);
+  });
+
+  it("TUI with a redirected stderr: the 'needs a login' warning is on the screen, stderr stays empty", async () => {
+    writeConfig();
+    const opened = vi.fn();
+
+    const t = tuiRun({ stderrIsTTY: false, openUrl: opened });
+    await t.shown(" · 0 MCP · ");
+    t.terminal.send("\x03");
+
+    expect(await t.result).toMatchObject({ code: 0, stderr: "" });
+    expect(t.screen()).toContain(
+      'mcp "tree-memory": needs a login; run tree-agent --mcp-login tree-memory once, then re-run',
+    );
+    expect(opened).not.toHaveBeenCalled();
   });
 
   it("no token, code, code_verifier or Authorization value in any log call or stderr line", async () => {

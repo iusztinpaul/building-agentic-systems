@@ -16,10 +16,20 @@ import type { PermissionPrompter } from "../types.ts";
 import { commandsFor, runCommand } from "./commands.ts";
 import { type InputAction, PromptInput, route } from "./input.ts";
 import { tuiPrompter } from "./permission-prompt.ts";
+import { type Notice, StartupScreen } from "./startup.ts";
 import { StatusBar } from "./status-bar.ts";
 import { cyan, dim } from "./style.ts";
 import { Transcript } from "./transcript.ts";
 import { TrustPrompt } from "./trust-prompt.ts";
+
+// What open() may show while the TUI owns the terminal (its stderr is
+// under the screen): a line — an MCP login's URL, a warning — and
+// Ctrl+C before the session opens, which open() should end its waits on.
+export interface StartupUi {
+  // `error`: a warning. False once the TUI is down.
+  notify(line: string, error?: boolean): boolean;
+  readonly signal: AbortSignal;
+}
 
 export interface TuiOptions {
   terminal: Terminal;
@@ -27,22 +37,56 @@ export interface TuiOptions {
   askTrust: boolean; // an untrusted cwd: ask before opening
   // Builds the session once trust is settled; `trust` is the user's
   // "y" (the caller records it in trusted.json). `prompter` asks
-  // permission questions on this screen.
-  open(trust: boolean, prompter: PermissionPrompter): Promise<AgentSession>;
+  // permission questions on this screen; `ui` shows its lines.
+  open(
+    trust: boolean,
+    prompter: PermissionPrompter,
+    ui: StartupUi,
+  ): Promise<AgentSession>;
   onStart?(tui: TUI): void; // tests read the screen through it
 }
 
-// Resolves with the exit code (0 on /exit or Ctrl+C when idle).
-// Errors from open() propagate after the terminal is restored.
+// Resolves with the exit code (0 on /exit or Ctrl+C when idle, 1 on
+// Ctrl+C before the session opened). Errors from open() propagate
+// after the terminal is restored.
 export async function runTui(o: TuiOptions): Promise<number> {
   const tui = new TuiMainScreen(o.terminal);
   tui.start();
   o.onStart?.(tui);
+  const quit = new AbortController();
+  let show: ((line: string, error?: boolean) => void) | undefined;
+  const ui: StartupUi = {
+    notify: (line, error) => {
+      show?.(line, error);
+      return show !== undefined;
+    },
+    signal: quit.signal,
+  };
   try {
     const trust = o.askTrust ? await askTrust(tui, o.cwd) : false;
-    const session = await o.open(trust, tuiPrompter(tui));
-    return await new App(tui, session, o.cwd).done;
+    const startup = new StartupScreen(() => quit.abort());
+    show = (line, error) => {
+      startup.add(line, error);
+      tui.requestRender();
+    };
+    tui.addChild(startup);
+    tui.setFocus(startup);
+    tui.requestRender();
+    const session = await o
+      .open(trust, tuiPrompter(tui), ui)
+      .catch((err: unknown) => {
+        if (quit.signal.aborted) return undefined;
+        throw err;
+      });
+    // Quit: its lines stay on the screen (and in the scrollback).
+    if (!session || quit.signal.aborted) return 1;
+    tui.removeChild(startup);
+    const app = new App(tui, session, o.cwd, startup.lines);
+    show = (line, error) => app.notice(line, error);
+    return await app.done;
   } finally {
+    show = undefined;
+    tui.renderNow(); // the last lines stay in the scrollback
     tui.stop();
   }
 }
@@ -72,7 +116,12 @@ class App {
   #compacting = false; // a /compact runs: typed text is refused
   #exit: (code: number) => void = () => {};
 
-  constructor(tui: TUI, session: AgentSession, cwd: string) {
+  constructor(
+    tui: TUI,
+    session: AgentSession,
+    cwd: string,
+    startup: readonly Notice[],
+  ) {
     this.#tui = tui;
     this.#session = session;
     this.done = new Promise((resolve) => {
@@ -105,6 +154,9 @@ class App {
     this.#transcript.load(session.messages);
     if (session.messages.length > 0) {
       this.#transcript.addNotice(`resumed session ${session.id}`);
+    }
+    for (const { text, error } of startup) {
+      this.#transcript.addNotice(text, error);
     }
     for (const notice of session.skillNotices) {
       this.#transcript.addNotice(notice, true);
@@ -204,6 +256,12 @@ class App {
     for (const line of result.lines) {
       this.#transcript.addNotice(line, result.error);
     }
+    this.#render();
+  }
+
+  // A line from the session's MCP clients (a login URL, a warning).
+  notice(line: string, error = false): void {
+    this.#transcript.addNotice(line, error);
     this.#render();
   }
 

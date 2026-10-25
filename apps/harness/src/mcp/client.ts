@@ -7,7 +7,8 @@
 // reconnects and re-initialises first. An HTTP server without a
 // configured Authorization header gets an MCP login (auth.ts): its
 // 401 ends the first handshake, the login runs outside the
-// `initialize` timer, and the handshake is retried once.
+// `initialize` timer, and the handshake is retried once. close(), or
+// the caller's `signal`, ends a handshake in flight at once.
 
 import { z } from "zod";
 import { log as defaultLog, type Logger } from "../log.ts";
@@ -72,6 +73,9 @@ export interface McpClientOptions {
   // server that needs a login is skipped with one warning.
   login?: LoginUi;
   freshLogin?: boolean; // --mcp-login: ignore the cached tokens
+  // The TUI's Ctrl+C at startup: a handshake or login in flight
+  // rejects now, its child or HTTP session dropped; later calls too.
+  signal?: AbortSignal;
 }
 
 export class McpClient {
@@ -82,6 +86,8 @@ export class McpClient {
   readonly #label: string;
   readonly #auth: McpAuth | undefined;
   readonly #closing = new AbortController(); // ends a login wait
+  readonly #stop: AbortSignal; // #closing or the caller's signal
+  #teardown: Promise<void> | undefined; // a stopped handshake's close
   #peer: JsonRpcPeer | undefined;
   #transport: Transport | undefined;
   #connecting: Promise<JsonRpcPeer> | undefined;
@@ -99,6 +105,9 @@ export class McpClient {
     this.#o = options;
     this.#log = options.log ?? defaultLog;
     this.#label = `mcp "${name}": `;
+    this.#stop = options.signal
+      ? AbortSignal.any([options.signal, this.#closing.signal])
+      : this.#closing.signal;
     if ("url" in server && !hasAuthorization(server.headers)) {
       this.#auth = new McpAuth({
         name,
@@ -175,13 +184,11 @@ export class McpClient {
     this.#peer?.close(new Error(`${this.#label}closed`));
     this.#peer = undefined;
     this.#transport = undefined;
-    await transport?.close();
+    await Promise.all([transport?.close(), this.#teardown]);
   }
 
   #connect(): Promise<JsonRpcPeer> {
-    if (this.#closed) {
-      return Promise.reject(new Error(`${this.#label}closed`));
-    }
+    if (this.#stop.aborted) return Promise.reject(this.#stopped());
     if (this.#peer) return Promise.resolve(this.#peer);
     this.#connecting ??= this.#handshake().finally(() => {
       this.#connecting = undefined;
@@ -216,22 +223,33 @@ export class McpClient {
       );
     }
     const signal = ui.signal
-      ? AbortSignal.any([ui.signal, this.#closing.signal])
-      : this.#closing.signal;
+      ? AbortSignal.any([ui.signal, this.#stop])
+      : this.#stop;
     await auth.login(challenge, { ...ui, signal });
   }
 
   async #attempt(): Promise<JsonRpcPeer> {
+    if (this.#stop.aborted) throw this.#stopped(); // after a login
     const transport = this.#createTransport();
     const peer = new JsonRpcPeer((m) => transport.send(m), {
       timeoutMs: this.#o.timeoutMs,
       log: this.#log,
       label: this.#label,
     });
+    // Not awaited: a child deaf to EOF is SIGTERMed only after 1 s.
+    const stop = () => {
+      peer.close(this.#stopped());
+      if (this.#peer === peer) {
+        this.#peer = undefined;
+        this.#transport = undefined;
+      }
+      this.#teardown = transport.close();
+    };
     let dropped: Error | undefined;
     await transport.start({
       onMessage: (message) => peer.receive(message),
       onClose: (error) => {
+        this.#stop.removeEventListener("abort", stop);
         dropped = error;
         peer.close(error);
         if (this.#peer !== peer) return;
@@ -239,6 +257,8 @@ export class McpClient {
         this.#transport = undefined;
       },
     });
+    this.#stop.addEventListener("abort", stop, { once: true });
+    if (this.#stop.aborted) stop(); // during start()
     try {
       const raw = await peer
         .request(
@@ -273,15 +293,21 @@ export class McpClient {
       transport.setProtocolVersion?.(protocolVersion);
       await peer.notify("notifications/initialized");
       if (dropped) throw dropped;
-      if (this.#closed) throw new Error(`${this.#label}closed`);
+      if (this.#stop.aborted) throw this.#stopped();
     } catch (err) {
+      this.#stop.removeEventListener("abort", stop);
       peer.close(err as Error);
-      await transport.close();
+      if (!this.#stop.aborted) await transport.close(); // else stop()
       throw err;
     }
     this.#peer = peer;
     this.#transport = transport;
     return peer;
+  }
+
+  #stopped(): Error {
+    const why = this.#closed ? "closed" : "connect cancelled";
+    return new Error(`${this.#label}${why}`);
   }
 
   #createTransport(): Transport {
@@ -322,7 +348,10 @@ export class McpClient {
 }
 
 export interface StartMcpOptions
-  extends Pick<McpClientOptions, "initializeTimeoutMs" | "log" | "login"> {
+  extends Pick<
+    McpClientOptions,
+    "initializeTimeoutMs" | "log" | "login" | "signal"
+  > {
   env: NodeJS.ProcessEnv;
   cwd: string;
   trusted: boolean; // the project .tree-agent/mcp.json too

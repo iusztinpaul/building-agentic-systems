@@ -679,3 +679,111 @@ describe("connectMcpServers / startMcp", () => {
     ]);
   });
 });
+
+describe("McpClient with a signal (the TUI's startup Ctrl+C)", () => {
+  // Stays up on stdin EOF (only the 1 s SIGTERM ends it); logs its pid.
+  const deafStdio = (): McpServer => ({
+    command: process.execPath,
+    args: [
+      "-e",
+      "require('fs').appendFileSync(process.env.PIDS, process.pid + '\\n');" +
+        "process.stdin.resume(); setInterval(() => {}, 1e6)",
+    ],
+    env: { PIDS: marker },
+    toolExposure: {},
+  });
+  const waitFor = async (ok: () => boolean) => {
+    for (let i = 0; i < 100 && !ok(); i++) await new Promise((r) => setTimeout(r, 20));
+  };
+  // The ms from the abort to the rejection, and its message.
+  const abortTimed = async (ctl: AbortController, pending: Promise<unknown>) => {
+    const caught = pending.catch((e: Error) => e.message);
+    const t0 = performance.now();
+    ctl.abort();
+    const message = await caught;
+    return { message, ms: performance.now() - t0 };
+  };
+
+  it("an abort mid-initialize rejects within 100 ms (not at the 20 s timeout); close() leaves no child", async () => {
+    const ctl = new AbortController();
+    const c = client(deafStdio(), { initializeTimeoutMs: 20_000, signal: ctl.signal });
+    const pending = c.listTools();
+    await waitFor(() => pidsOf(marker).length === 1);
+    const [pid] = pidsOf(marker);
+
+    const { message, ms } = await abortTimed(ctl, pending);
+
+    expect(message).toBe('mcp "fake": connect cancelled');
+    expect(ms).toBeLessThan(100);
+    expect(c.connected).toBe(false);
+    await c.close(); // waits for the child the abort is ending
+    expect(await gone(pid as number)).toBe(true);
+    await expect(c.callTool("echo")).rejects.toThrow('mcp "fake": closed');
+  });
+
+  it("an abort mid-initialize over HTTP aborts the hung request (the transport is dropped)", async () => {
+    const ctl = new AbortController();
+    const aborted: string[] = [];
+    const fetch = ((url: unknown, init?: RequestInit) => {
+      init?.signal?.addEventListener("abort", () => aborted.push(String(url)));
+      return hangingFetch(url as string, init);
+    }) as typeof globalThis.fetch;
+    const c = client(SILENT_HTTP, { fetch, initializeTimeoutMs: 20_000, signal: ctl.signal });
+    const pending = c.listTools();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const { message, ms } = await abortTimed(ctl, pending);
+
+    expect(message).toBe('mcp "fake": connect cancelled');
+    expect(ms).toBeLessThan(100);
+    expect(aborted).toEqual(["http://silent.test/mcp"]);
+  });
+
+  it("an abort after connecting drops the child; later calls reject without a respawn", async () => {
+    const ctl = new AbortController();
+    const c = client(stdio(), { signal: ctl.signal });
+    await c.listTools();
+    const [pid] = pidsOf(marker);
+
+    ctl.abort();
+
+    expect(c.connected).toBe(false);
+    expect(await gone(pid as number)).toBe(true);
+    await expect(c.callTool("echo")).rejects.toThrow('mcp "fake": connect cancelled');
+    expect(pidsOf(marker)).toHaveLength(1);
+  });
+
+  it("an already-aborted signal spawns nothing", async () => {
+    const ctl = new AbortController();
+    ctl.abort();
+    const c = client(stdio(), { signal: ctl.signal });
+
+    await expect(c.listTools()).rejects.toThrow('mcp "fake": connect cancelled');
+    expect(pidsOf(marker)).toEqual([]);
+  });
+
+  it("connectMcpServers: an abort ends every hung handshake at once, one warning each, the clients kept", async () => {
+    const ctl = new AbortController();
+    const { log, lines } = sink();
+    const pending = connectMcpServers(
+      { deaf: deafStdio(), silent: SILENT_HTTP },
+      { log, fetch: hangingFetch, initializeTimeoutMs: 20_000, signal: ctl.signal },
+    );
+    await waitFor(() => pidsOf(marker).length === 1);
+
+    const t0 = performance.now();
+    ctl.abort();
+    const connected = await pending;
+    clients.push(...connected);
+
+    expect(performance.now() - t0).toBeLessThan(100);
+    expect(connected.map((c) => [c.name, c.connected])).toEqual([
+      ["deaf", false],
+      ["silent", false],
+    ]);
+    expect(lines.filter((l) => l.includes("warn:")).sort()).toEqual([
+      '[tree-agent] warn: mcp "deaf": connect cancelled\n',
+      '[tree-agent] warn: mcp "silent": connect cancelled\n',
+    ]);
+  });
+});
