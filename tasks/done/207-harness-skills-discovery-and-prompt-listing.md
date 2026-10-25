@@ -43,7 +43,8 @@ Implements: ADR-016 §4 (progressive disclosure: skills listed by name + descrip
 - [x] A 400-char description is listed as its first 249 chars + `…`; with a fake `contextLength` of 20 000
       (budget 200 tokens ≈ 800 chars) the listing stops at the budget and the dropped names appear in one
       warning; a `disable-model-invocation: true` skill is absent from the section and present for `/skill:`.
-- [x] `/skill:<name> arg1 arg2` on FakeProvider sends a user message equal to the `SKILL.md` body + the args;
+- [x] (superseded by 215) `/skill:<name> arg1 arg2` on FakeProvider sends a user message equal to `# <absolute SKILL.md path>`,
+      a newline, then the `SKILL.md` body with every `$ARGUMENTS` replaced by the args (the args after a blank line when the body has none);
       `/skill:nope` answers one line with the known names and sends nothing to the provider.
 - [x] Bad frontmatter in one skill does not stop discovery of the others; the diagnostic names the file.
 - [x] `--no-skills` → no `skills` section and no file reads under any skills root (spy on the walker).

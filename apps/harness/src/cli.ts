@@ -35,7 +35,8 @@ export const DEFAULT_MAX_TURNS = 50;
 const USAGE = `usage: tree-agent [flags]              (TUI, needs a terminal)
        tree-agent [flags] "<prompt>"
        <command> | tree-agent [flags]   (line 1: prompt, rest: follow-ups)
-flags: --resume <id> | --continue  --model <id>  --cwd <dir>
+flags: --help | -h (this text)
+       --resume <id> | --continue  --model <id>  --cwd <dir>
        --max-turns <n> (${DEFAULT_MAX_TURNS})  --trust  --json
        --no-skills  --no-mcp (no mcp.json read, no server started)
        --permission-mode ask|auto (TUI: settings, ask; headless: auto)
@@ -61,6 +62,7 @@ export interface CliArgs {
 export type Mode =
   | { kind: "headless"; args: CliArgs; from: "argv" | "stdin" }
   | { kind: "tui"; args: CliArgs }
+  | { kind: "help" }
   | { kind: "usage"; error?: string };
 
 export interface Stdin {
@@ -88,12 +90,13 @@ export function resolveMode(
   isTTY: boolean,
   stdinIsPipe: boolean,
 ): Mode {
-  let args: CliArgs;
+  let args: CliArgs | "help";
   try {
     args = parseCli(argv);
   } catch (err) {
     return { kind: "usage", error: (err as Error).message };
   }
+  if (args === "help") return { kind: "help" };
   if (args.prompt) return { kind: "headless", args, from: "argv" };
   if (stdinIsPipe) return { kind: "headless", args, from: "stdin" };
   if (args.json || !isTTY) return { kind: "usage" };
@@ -106,6 +109,10 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
   const { env, stdout, stderr } = deps;
   const stdin = deps.stdin ?? noStdin;
   const mode = resolveMode(argv, stdin.isTTY, stdin.isPipe);
+  if (mode.kind === "help") {
+    stdout.write(`${USAGE}\n`);
+    return 0;
+  }
   if (mode.kind === "usage") {
     const { error } = mode;
     stderr.write(`${error ? `${error}\n` : ""}${USAGE}\n`);
@@ -235,10 +242,12 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
   }
 }
 
-function parseCli(argv: string[]): CliArgs {
+// "help" for --help / -h, whatever else is on the line.
+function parseCli(argv: string[]): CliArgs | "help" {
   const { values, positionals } = parseArgs({
     args: argv,
     options: {
+      help: { type: "boolean", short: "h", default: false },
       model: { type: "string" },
       "max-turns": { type: "string" },
       cwd: { type: "string" },
@@ -255,6 +264,7 @@ function parseCli(argv: string[]): CliArgs {
     allowPositionals: true,
     strict: true,
   });
+  if (values.help) return "help";
   const turns = values["max-turns"] ?? String(DEFAULT_MAX_TURNS);
   const maxTurns = Number(turns);
   if (!Number.isInteger(maxTurns) || maxTurns < 1) {

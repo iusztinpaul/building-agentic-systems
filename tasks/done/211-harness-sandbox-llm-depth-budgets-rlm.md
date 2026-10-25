@@ -39,7 +39,7 @@ a per-call cost cap in currency (tokens are the budget); caching `llm()` answers
 - [x] Depth 1: `llm("x")` reaches `completeText` with no `tools` and the default system prompt; with
       `schema` it reaches `complete<T>` and returns the parsed object; a schema mismatch after the retry throws
       inside the script with the parse message; `tools: true` at depth 1 is ignored (no sub-loop).
-- [x] Budgets: the 17th `llm()` in one script throws naming `maxCalls`; a 200 001-char prompt throws naming
+- [x] Budgets: the 17th `llm()` in one script throws naming `maxCalls` (default now 64 — task 215); a 200 001-char prompt throws naming
       `maxInputChars`; scripted `usage` summing past 400 000 throws naming `maxTotalTokens`;
       `Promise.all(8 llm calls)` shows ≤ 4 in flight.
 - [x] Depth 2 (`codemode.llm.depth: 2`): a sub-call can `read` a file it was handed (FakeProvider scripts a

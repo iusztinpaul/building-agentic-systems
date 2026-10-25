@@ -48,7 +48,7 @@ export const Settings = z
           .object({
             model: z.string().optional(),
             depth: z.union([z.literal(1), z.literal(2)]).default(1),
-            maxCalls: z.number().int().positive().default(16),
+            maxCalls: z.number().int().positive().default(64),
             maxInputChars: z.number().int().positive().default(200_000),
             maxTotalTokens: z.number().int().positive().default(400_000),
             maxSubTurns: z.number().int().positive().default(8),

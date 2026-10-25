@@ -237,7 +237,10 @@ describe("llm() at depth 1", () => {
 
 describe("llm() budgets", () => {
   it("the 17th call in one script throws naming maxCalls; the catch keeps the partial result", async () => {
-    const t = setup({ script: { texts: Array.from({ length: 17 }, (_, i) => `s${i}`) } });
+    const t = setup({
+      script: { texts: Array.from({ length: 17 }, (_, i) => `s${i}`) },
+      llm: { maxCalls: 16 },
+    });
 
     const result = await t.run(`
       const out = [];
@@ -249,6 +252,20 @@ describe("llm() budgets", () => {
       error: "llm budget exceeded: maxCalls=16 per script (codemode.llm.maxCalls)",
     });
     expect((t.provider as FakeProvider).textRequests).toHaveLength(16);
+  });
+
+  it("the default maxCalls is 64: the 65th call throws naming it", async () => {
+    const t = setup({ script: { texts: Array.from({ length: 65 }, (_, i) => `s${i}`) } });
+
+    const result = await t.run(`
+      let n = 0;
+      try { for (let i = 0; i < 100; i++) { await llm("slice " + i); n++; } }
+      catch (e) { return { n, error: e.message }; }`);
+
+    expect(JSON.parse(result.content)).toEqual({
+      n: 64,
+      error: "llm budget exceeded: maxCalls=64 per script (codemode.llm.maxCalls)",
+    });
   });
 
   it("the budget is per script: the next script starts at zero", async () => {

@@ -26,7 +26,7 @@ const DEFAULTS = {
     concurrency: 4,
     llm: {
       depth: 1,
-      maxCalls: 16,
+      maxCalls: 64,
       maxInputChars: 200_000,
       maxTotalTokens: 400_000,
       maxSubTurns: 8,

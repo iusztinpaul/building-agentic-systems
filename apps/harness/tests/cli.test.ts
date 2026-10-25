@@ -103,6 +103,26 @@ describe("tree-agent (spawned)", () => {
     expect(result.stderr).toMatch(/^usage: tree-agent /m);
   });
 
+  it.each([[["--help"]], [["-h"]], [["hi", "--help"]], [["--json", "-h"]]])(
+    "%j prints the usage on stdout and exits 0, with no key and nothing written",
+    (argv) => {
+      const result = spawnCli(argv);
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toMatch(/^usage: tree-agent [\s\S]*--help \| -h/);
+      expect(readdirSync(home)).toEqual([]);
+    },
+  );
+
+  it("prints an unknown option's error and the usage on stderr and exits 1", () => {
+    const result = spawnCli(["--bogus"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toMatch(/^Unknown option '--bogus'[\s\S]*\nusage: tree-agent /);
+  });
+
   it("names OPENROUTER_API_KEY on one stderr line and exits 1 when the key is missing", () => {
     const result = spawnCli(["hi"]);
 
@@ -239,6 +259,10 @@ describe("resolveMode", () => {
     { argv: ["--json"], isTTY: true, pipe: false, kind: "usage" },
     { argv: [], isTTY: true, pipe: false, kind: "tui" },
     { argv: [], isTTY: false, pipe: false, kind: "usage" },
+    { argv: ["--help"], isTTY: true, pipe: false, kind: "help" },
+    { argv: ["-h"], isTTY: false, pipe: true, kind: "help" },
+    { argv: ["hi", "--help", "--json"], isTTY: false, pipe: false, kind: "help" },
+    { argv: ["-h", "--max-turns", "0"], isTTY: true, pipe: false, kind: "help" },
   ])("$argv, TTY $isTTY, pipe $pipe → $kind", ({ argv, isTTY, pipe, kind, from }) => {
     const mode = resolveMode(argv, isTTY, pipe);
 
@@ -628,7 +652,10 @@ describe("main (skills)", () => {
     expect(fake.requests[1]?.context.system).toContain("<skills>");
   });
 
-  it("/skill:<name> arg1 arg2 sends the SKILL.md body + the args as the user message", async () => {
+  const header = (cwd: string, name: string) =>
+    `# ${join(cwd, ".agents", "skills", name, "SKILL.md")}\n`;
+
+  it("/skill:<name> arg1 arg2 sends the SKILL.md path header, the body + the args as the user message", async () => {
     const cwd = project();
     const fake = new FakeProvider({ streams: [textTurn("ok")] });
 
@@ -636,8 +663,25 @@ describe("main (skills)", () => {
 
     expect(result.code).toBe(0);
     expect(fake.requests[0]?.context.messages).toEqual([
-      { role: "user", content: "# x\nDo the x steps.\n\narg1 arg2" },
+      { role: "user", content: `${header(cwd, "x")}# x\nDo the x steps.\n\narg1 arg2` },
     ]);
+  });
+
+  it("/skill:tree-memory on this repo sends its SKILL.md path and substitutes $ARGUMENTS", async () => {
+    const repo = fileURLToPath(new URL("../../..", import.meta.url));
+    const fake = new FakeProvider({ streams: [textTurn("ok")] });
+
+    const result = await run(
+      ["/skill:tree-memory what do I know about Modal?", "--cwd", repo, "--trust", "--no-mcp"],
+      fake,
+    );
+
+    expect(result.code).toBe(0);
+    const message = String(fake.requests[0]?.context.messages[0]?.content);
+    const [first, ...lines] = message.split("\n");
+    expect(first).toBe(`# ${join(repo, ".agents", "skills", "tree-memory", "SKILL.md")}`);
+    expect(lines).toContain("The query or instruction to run is: what do I know about Modal?");
+    expect(message).not.toContain("$ARGUMENTS");
   });
 
   it("/skill: reaches a hidden skill, also as the first stdin line", async () => {
@@ -650,7 +694,7 @@ describe("main (skills)", () => {
 
     expect(result.code).toBe(0);
     expect(fake.requests[1]?.context.messages.map((m) => m.content)).toEqual([
-      "# tree-memory\nDo the tree-memory steps.\n\nwhat do I know about Modal?",
+      `${header(cwd, "tree-memory")}# tree-memory\nDo the tree-memory steps.\n\nwhat do I know about Modal?`,
       "ok",
       "thanks",
     ]);
@@ -680,9 +724,9 @@ describe("main (skills)", () => {
 
     expect(result.code).toBe(0);
     expect(fake.requests[1]?.context.messages.map((m) => m.content)).toEqual([
-      "# x\nDo the x steps.\n\na",
+      `${header(cwd, "x")}# x\nDo the x steps.\n\na`,
       "ok",
-      "# tree-memory\nDo the tree-memory steps.\n\nb",
+      `${header(cwd, "tree-memory")}# tree-memory\nDo the tree-memory steps.\n\nb`,
     ]);
   });
 

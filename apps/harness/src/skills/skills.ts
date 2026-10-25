@@ -122,9 +122,16 @@ export function parseSkill(text: string, location: string): Skill | string {
   };
 }
 
-// The user message of `/skill:<name> [args]`: the body, then the args.
+// The user message of `/skill:<name> [args]`: `# <SKILL.md path>`
+// (as context files), then the body with each `$ARGUMENTS` replaced
+// by the args, or the body, a blank line and the args. Empty content
+// (nothing to send) is "", header or not.
 export function skillMessage(skill: Skill, args: string): string {
-  return [skill.body, args.trim()].filter(Boolean).join("\n\n");
+  const trimmed = args.trim();
+  const content = skill.body.includes("$ARGUMENTS")
+    ? skill.body.replaceAll("$ARGUMENTS", () => trimmed)
+    : [skill.body, trimmed].filter(Boolean).join("\n\n");
+  return content ? `# ${skill.location}\n${content}` : "";
 }
 
 // "/skill:<name> [args]" → its parts; anything else → undefined. The

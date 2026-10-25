@@ -452,14 +452,31 @@ describe("/skill: messages", () => {
     disableModelInvocation: false,
   };
 
-  it("is the body, a blank line, then the args", () => {
-    expect(skillMessage(s, "arg1 arg2")).toBe("# X\nDo it.\n\narg1 arg2");
-    expect(skillMessage(s, "  ")).toBe("# X\nDo it.");
+  it("is the SKILL.md path header, the body, a blank line, then the args", () => {
+    expect(skillMessage(s, "arg1 arg2")).toBe("# /x/SKILL.md\n# X\nDo it.\n\narg1 arg2");
+    expect(skillMessage(s, "  ")).toBe("# /x/SKILL.md\n# X\nDo it.");
   });
 
-  it("is the args alone for an empty body, and empty with no args either", () => {
-    expect(skillMessage({ ...s, body: "" }, "q")).toBe("q");
+  it("replaces every $ARGUMENTS with the trimmed args and appends nothing", () => {
+    const body = "Run: $ARGUMENTS now";
+
+    expect(skillMessage({ ...s, body }, " q ")).toBe("# /x/SKILL.md\nRun: q now");
+    expect(skillMessage({ ...s, body: "$ARGUMENTS and $ARGUMENTS" }, "a")).toBe(
+      "# /x/SKILL.md\na and a",
+    );
+    expect(skillMessage({ ...s, body }, "")).toBe("# /x/SKILL.md\nRun:  now");
+  });
+
+  it("keeps $ patterns in the args literal", () => {
+    expect(skillMessage({ ...s, body: "Q: $ARGUMENTS" }, "costs $$5 $& $'")).toBe(
+      "# /x/SKILL.md\nQ: costs $$5 $& $'",
+    );
+  });
+
+  it("is the header and the args for an empty body, and empty with no args either", () => {
+    expect(skillMessage({ ...s, body: "" }, "q")).toBe("# /x/SKILL.md\nq");
     expect(skillMessage({ ...s, body: "" }, "")).toBe("");
+    expect(skillMessage({ ...s, body: "$ARGUMENTS" }, "")).toBe("");
   });
 
   it.each([

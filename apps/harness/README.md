@@ -58,13 +58,14 @@ Smoke test: `tree-agent "say hi"` from the repo root (or any shell where `OPENRO
 
 ## CLI
 
-There is no `--help` flag: an unknown option prints the error and the usage text and exits 1. The usage text (`src/cli.ts`):
+`--help` / `-h` print the usage text and exit 0; an unknown option prints its error and the usage text on stderr and exits 1. The usage text (`src/cli.ts`):
 
 ```
 usage: tree-agent [flags]              (TUI, needs a terminal)
        tree-agent [flags] "<prompt>"
        <command> | tree-agent [flags]   (line 1: prompt, rest: follow-ups)
-flags: --resume <id> | --continue  --model <id>  --cwd <dir>
+flags: --help | -h (this text)
+       --resume <id> | --continue  --model <id>  --cwd <dir>
        --max-turns <n> (50)  --trust  --json
        --no-skills  --no-mcp (no mcp.json read, no server started)
        --permission-mode ask|auto (TUI: settings, ask; headless: auto)
@@ -89,6 +90,7 @@ A positional prompt wins over stdin. Headless text mode prints each final answer
 
 | Flag | Default | Effect |
 |---|---|---|
+| `--help`, `-h` | — | print the usage text on stdout and exit 0, whatever else is on the line |
 | `--model <id>` | `settings.model` | OpenRouter model id, checked against `GET /api/v1/models` (unknown id: exit 1). On a resumed session it replaces the recorded model. |
 | `--permission-mode ask\|auto` | TUI: `settings.permissions.mode` (`ask`); headless: `auto` | see [Permissions](#permissions) |
 | `--on-blocked stop\|continue` | `stop` | headless only: on a permission deny, stop with exit 2, or hand the model the blocked error and go on |
@@ -106,7 +108,7 @@ A positional prompt wins over stdin. Headless text mode prints each final answer
 
 | Code | Meaning |
 |---|---|
-| 0 | completed (TUI: `/exit`, or Ctrl+C while idle) |
+| 0 | completed (TUI: `/exit`, or Ctrl+C while idle), or `--help` |
 | 1 | error, usage error, `max_turns`, an unusable `/skill:` line, or a headless run aborted by Ctrl+C / SIGTERM |
 | 2 | headless run blocked by the permission gate (`--on-blocked stop`) |
 | 130 / 143 | a second Ctrl+C / SIGTERM during a headless run: Node's default exit; MCP children are killed |
@@ -174,7 +176,7 @@ Layers merge key by key, later wins: defaults → `~/.tree-agent/settings.json` 
 | `codemode.concurrency` | 4 | parallel host calls (`tools.*`, `llm()`) per script |
 | `codemode.llm.model` | unset (= `decisionModel`) | default model of `llm()` |
 | `codemode.llm.depth` | 1 | 1 or 2 (see [Codemode and `llm()`](#codemode-and-llm)) |
-| `codemode.llm.maxCalls` | 16 | `llm()` calls per script |
+| `codemode.llm.maxCalls` | 64 | `llm()` calls per script |
 | `codemode.llm.maxInputChars` | 200 000 | per call |
 | `codemode.llm.maxTotalTokens` | 400 000 | per script, summed usage |
 | `codemode.llm.maxSubTurns` | 8 | depth-2 sub-loop turns |
@@ -336,7 +338,7 @@ Permissions inside a script: every `tools.x()` passes the same gate with origin 
 | 1 | answer from its prompt only (plain completion) | default |
 | 2 | with `{tools: true}`, run a mini loop (≤ `maxSubTurns` turns) that calls tools (the registry minus the `codemode` tool itself, so no nested scripts) through the same gate | `codemode.llm.depth: 2` |
 
-A call beyond the configured depth is a script error. Budgets per script: `maxCalls` 16, `maxInputChars` 200 000 per call, `maxTotalTokens` 400 000; exceeding one throws inside the script (`llm budget exceeded: maxCalls=16 …`). Each call emits an `llm_call` event (depth, model, usage) and its cost is added to the session cost.
+A call beyond the configured depth is a script error. Budgets per script: `maxCalls` 64, `maxInputChars` 200 000 per call, `maxTotalTokens` 400 000; exceeding one throws inside the script (`llm budget exceeded: maxCalls=64 …`). Each call emits an `llm_call` event (depth, model, usage) and its cost is added to the session cost.
 
 ### Worked example: map-reduce over memory (RLM)
 
@@ -359,11 +361,7 @@ const answer = await llm(
 return answer.facts;
 ```
 
-The main context grows by the script and the result; the 40 hits and 40 sub-answers never enter it. **This script makes up to 41 `llm()` calls, above the default `maxCalls` of 16**: the 17th call throws and `Promise.all` fails whole. Raise the budget in `~/.tree-agent/settings.json` (or the trusted project's `.tree-agent/settings.json`) before running it:
-
-```json
-{ "codemode": { "llm": { "maxCalls": 48 } } }
-```
+The main context grows by the script and the result; the 40 hits and 40 sub-answers never enter it. The example's 41 calls fit the default `maxCalls` (64); `maxTotalTokens` (400 000) and `timeoutMs` (60 000) are the cost and time bounds.
 
 ## Compaction
 
@@ -400,7 +398,7 @@ A skill is a directory with a `SKILL.md` whose YAML frontmatter has `name`, `des
 
 The prompt lists only name, description (capped at 250 characters) and path; the model `read`s the body when a task matches. The section is capped at `skills.listingBudgetRatio` × `contextLength`; skills past the cap are dropped with a startup warning. `disable-model-invocation: true` hides a skill from the listing, but `/skill:` still runs it. Bad frontmatter and duplicate names become warnings, never crashes.
 
-`/skill:<name> [args]` (TUI, a headless prompt, or any stdin line) sends the full `SKILL.md` body plus the args as a user message. The `/skill:` prefix is case-insensitive, the name is matched exactly. An unknown name prints the known names and sends nothing (headless: exit 1). `--no-skills` turns discovery off. The `/skill:` message carries no skill-directory header, so a skill whose body links relative files (`rag.md`) leaves the model without a base path; spell out the path in the args if needed.
+`/skill:<name> [args]` (TUI, a headless prompt, or any stdin line) injects, as one user message, `# <absolute SKILL.md path>` on the first line and then the full `SKILL.md` body with every `$ARGUMENTS` replaced by the args (appended after a blank line when the body has none), so relative links in the body resolve against the skill dir. The `/skill:` prefix is case-insensitive, the name is matched exactly. An unknown name prints the known names and sends nothing (headless: exit 1). `--no-skills` turns discovery off.
 
 ## Tests
 

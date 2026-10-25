@@ -376,7 +376,7 @@ describe("runTui", () => {
     await t.exit;
   });
 
-  it("shows skill diagnostics at startup and sends /skill:x args as the SKILL.md body + args", async () => {
+  it("shows skill diagnostics at startup and sends /skill:x args as the SKILL.md path, body + args", async () => {
     const fake = new FakeProvider({ streams: [[fakeDone("ok")]] });
     const t = await start(fake, { skills: skillsFixture() });
     expect(t.screen()).toContain("skills: /a/SKILL.md: missing name");
@@ -386,7 +386,7 @@ describe("runTui", () => {
     await until(() => fake.requests.length === 1 && !t.session().running);
 
     expect(fake.requests[0]?.context.messages).toEqual([
-      { role: "user", content: "# X\nDo it.\n\ngo now" },
+      { role: "user", content: "# /skills/x/SKILL.md\n# X\nDo it.\n\ngo now" },
     ]);
     expect(t.screen()).toContain("› /skill:x go now");
     t.terminal.send("\x03");
@@ -422,7 +422,10 @@ describe("runTui", () => {
     await until(() => !t.session().running);
 
     const users = provider.requests[1]?.context.messages.filter((m) => m.role === "user");
-    expect(users?.map((m) => m.content)).toEqual(["start", "# X\nDo it.\n\nmore"]);
+    expect(users?.map((m) => m.content)).toEqual([
+      "start",
+      "# /skills/x/SKILL.md\n# X\nDo it.\n\nmore",
+    ]);
     t.terminal.send("\x03");
     await t.exit;
   });

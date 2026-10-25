@@ -394,7 +394,7 @@ when the task matches its description. Resolve relative paths against the skill 
 </available_skills>
 ```
 
-Description cap 250 chars (truncated with `…`); the whole section cap is 1% of `contextLength`, remaining skills are dropped with a startup warning. `disable-model-invocation` hides a skill from the section. `/skill:<name> [args]` (TUI and headless) injects the full `SKILL.md` body plus args as a user message. Diagnostics (bad frontmatter, duplicate names) are collected, not thrown.
+Description cap 250 chars (truncated with `…`); the whole section cap is 1% of `contextLength`, remaining skills are dropped with a startup warning. `disable-model-invocation` hides a skill from the section. `/skill:<name> [args]` (TUI and headless) injects, as one user message, `# <absolute SKILL.md path>` on the first line and then the full `SKILL.md` body with every `$ARGUMENTS` replaced by the args (appended after a blank line when the body has none), so relative links in the body resolve against the skill dir. Diagnostics (bad frontmatter, duplicate names) are collected, not thrown.
 
 ## 10. MCP client and codemode (`src/mcp/`, `src/codemode/`)
 
@@ -483,7 +483,7 @@ interface LlmOptions {
 
 Why depth 1 is the default: it is the RLM paper's setting (the recursive calls are plain completions), the cost is linear in the number of slices, the permission story stays single-gate, and the demo (map-reduce over a memory server's search results) needs nothing more. Depth 2 exists so the chapter can show the next step with one setting change: a sub-call that must `read` a file it was handed. `depth` is enforced in `ToolContext.depth`; a call beyond the configured depth returns an error to the script.
 
-**Budgets** (`settings.codemode.llm`): `maxCalls` 16 per script, `maxInputChars` 200 000 per call, `maxTotalTokens` 400 000 per script (sum of `usage`), `concurrency` 4. Each call emits `AgentEvent llm_call` so the TUI shows them nested under the `codemode` tool card and the status bar adds their cost.
+**Budgets** (`settings.codemode.llm`): `maxCalls` 64 per script, `maxInputChars` 200 000 per call, `maxTotalTokens` 400 000 per script (sum of `usage`), `concurrency` 4. Each call emits `AgentEvent llm_call` so the TUI shows them nested under the `codemode` tool card and the status bar adds their cost.
 
 **Worked example** (what the book lists; budgeted to 55 chars for annotations):
 
@@ -675,7 +675,8 @@ tree-agent "<prompt>"                   headless: run, print final text, exit (m
 tree-agent "<prompt>" --json            headless: one AgentEvent per line (JSONL) on stdout
 cat task.md | tree-agent                headless, prompt from stdin (extra lines = follow-ups)
 tree-agent "<prompt>" --resume <id>     headless on an existing session
-flags: --model <id> --permission-mode ask|auto (default: ask in TUI, auto headless)
+flags: --help | -h (usage on stdout, exit 0)
+       --model <id> --permission-mode ask|auto (default: ask in TUI, auto headless)
        --compact-at <ratio>
        --max-turns <n> (default 50) --no-mcp --no-skills
        --on-blocked stop|continue --cwd <dir> --trust
@@ -705,7 +706,7 @@ export const Settings = z.object({
     inlineBudgetTokens: z.number().default(3_000), timeoutMs: z.number().default(60_000),
     maxToolCalls: z.number().default(50), concurrency: z.number().default(4),
     llm: z.object({ model: z.string().optional(), depth: z.union([z.literal(1), z.literal(2)]).default(1),
-      maxCalls: z.number().default(16), maxInputChars: z.number().default(200_000),
+      maxCalls: z.number().default(64), maxInputChars: z.number().default(200_000),
       maxTotalTokens: z.number().default(400_000), maxSubTurns: z.number().default(8) }).default({}),
   }).default({}),
   contextFiles: z.object({ maxChars: z.number().default(40_000) }).default({}),

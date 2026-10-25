@@ -192,3 +192,12 @@ $ timestamped boot of the same uv command: 8.3 s first Python import warning (op
 ### [SWE] 2026-10-25 06:30 — Addendum
 - The 10 s `initialize` "BLOCKER" in the SWE entry above is superseded by the 208 post-commit fix: `mcp.initializeTimeoutMs`, a setting with a 30 s default.
 - Test count is now 856 (855 after the 208 fix, +1 for the `*Ms` 2^31 - 1 bound fold-in); the README also lists `/compact` among the commands refused mid-run.
+
+### [PA] 2026-10-25 05:35 — Acceptance Review (feature `tree-agent-harness`, PR #48, head b31d8ca)
+
+**VERDICT: REJECT**
+
+Reviewed from the user's POV across tasks 202–213 (this entry sits on the feature's closing task). Evidence checked: `make harness-tests` 46 files / 856 passed incl. the two live OpenRouter tests; headless `--no-mcp --no-skills "Reply with exactly: ok"` → `ok`, exit 0; `--permission-mode ask` write → `permission` event (`deny`, `source: "headless"`) before the `tool_result`, `agent_end(blocked)`, exit 2, no file written; repo-root `--trust --json` memory search → `mcp__tree_memory_local__search_memory` (direct), classifier `allow`, answer citing the hits, exit 0; an `auto` write outside the cwd → classified dangerous → headless deny (confirms the 206 AC wording is wrong, not the gate); unknown `/skill:` → one line + exit 1; a bad `settings.json` → file + key path, exit 1; README relative links and anchors all resolve; ADR-016 and the glossary entries are in the diff.
+
+Found 4 issues (the `/skill:` message has no skill-dir header and leaves `$ARGUMENTS` literal; the default `codemode.llm.maxCalls` 16 fails the feature's own §10.6 worked example; `--help` is an error; the 206 `[HUMAN]` `auto` AC contradicts the shipped classifier). Filed rollup task: `tasks/215-pa-rejection-tree-agent-harness.md`. The stale harness sentences in `apps/memory/README.md` are out of this feature's files → separate task `tasks/216-memory-readme-harness-mcp-wording.md`. Task 214 (memory-server `readOnlyHint`) scoping confirmed.
+Pipeline re-runs from the inner loop with the rollup task; on green, re-run acceptance on the feature.

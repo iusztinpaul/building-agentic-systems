@@ -290,16 +290,17 @@ describe("runCommand /skill:", () => {
     return { session, skills };
   }
 
-  it("/skill:x arg1 arg2 answers with the prompt to send: the body + the args", async () => {
+  it("/skill:x arg1 arg2 answers with the prompt to send: the path header, the body + the args", async () => {
     const t = await withSkills();
+    const header = (name: string) => `# ${join(t.skills, name, "SKILL.md")}\n`;
 
     expect(await runCommand(t.session, "skill:x", "arg1 arg2")).toEqual({
       lines: [],
-      prompt: "# x\nSteps.\n\narg1 arg2",
+      prompt: `${header("x")}# x\nSteps.\n\narg1 arg2`,
     });
     expect(await runCommand(t.session, "skill:secret", "")).toEqual({
       lines: [],
-      prompt: "# secret\nSteps.",
+      prompt: `${header("secret")}# secret\nSteps.`,
     });
   });
 

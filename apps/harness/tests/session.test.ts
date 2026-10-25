@@ -974,7 +974,9 @@ describe("AgentSession skills", () => {
     expect(listed(system)).toEqual(["shown"]);
     expect(system).not.toContain("secret");
     expect(t.session.skills.map((s) => s.name)).toEqual(["secret", "shown"]);
-    expect(t.session.skillMessage("secret", "why?")).toBe("# secret\n\nwhy?");
+    expect(t.session.skillMessage("secret", "why?")).toBe(
+      `# ${join(t.skills, "secret", "SKILL.md")}\n# secret\n\nwhy?`,
+    );
   });
 
   it("answers an unknown skill name with the known ones", async () => {
@@ -1033,12 +1035,13 @@ describe("AgentSession skills", () => {
     );
   });
 
-  it("sends an empty-body skill's args alone and refuses an empty message", async () => {
+  it("sends an empty-body skill's header and args and refuses an empty message", async () => {
     const t = await withSkills(["empty"]);
-    writeFileSync(join(t.skills, "empty", "SKILL.md"), "---\nname: empty\ndescription: d\n---\n\n");
+    const location = join(t.skills, "empty", "SKILL.md");
+    writeFileSync(location, "---\nname: empty\ndescription: d\n---\n\n");
     await t.session.reload();
 
-    expect(t.session.skillMessage("empty", "q")).toBe("q");
+    expect(t.session.skillMessage("empty", "q")).toBe(`# ${location}\nq`);
     expect(() => t.session.skillMessage("empty", " ")).toThrow(
       'skill "empty" has an empty body and no args; nothing sent',
     );
@@ -1616,8 +1619,8 @@ describe("AgentSession with codemode", () => {
       [toolTurn(script(WORKED_EXAMPLE)), textTurn("Two facts.")],
       {
         ...withHits(),
-        // 41 calls: past the default maxCalls (16), as the spec's example is
-        codemode: { ...codemode(), llm: { ...LIMITS.llm, maxCalls: 41 } },
+        // 41 calls, inside the default maxCalls (64): the spec's example as printed
+        codemode: codemode(),
         permissionMode: "ask",
         prompter: {
           ask: async (call) => {
