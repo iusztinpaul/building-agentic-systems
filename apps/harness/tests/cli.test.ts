@@ -899,6 +899,54 @@ describe("main (TUI)", () => {
     expect(t.fake.requests[0]?.context.system).not.toContain("project rule");
   });
 
+  it("/mcp lists 0 servers with only .mcp.json present (no .tree-agent/mcp.json)", async () => {
+    const cwd = join(home, "proj");
+    mkdirSync(cwd, { recursive: true });
+    writeFileSync(
+      join(cwd, ".mcp.json"),
+      JSON.stringify({ mcpServers: { "tree-memory-local": { command: "uv" } } }),
+    );
+    const t = await tui(["--trust"]);
+
+    t.terminal.type("/mcp");
+    t.terminal.send("\r");
+    await shown(t.terminal, "MCP servers (0)");
+    t.terminal.send("\x03");
+
+    expect((await t.result).code).toBe(0);
+  });
+
+  it("/mcp shows a configured server connected with its counts; the status bar counts it", async () => {
+    const cwd = join(home, "proj");
+    mkdirSync(join(cwd, ".tree-agent"), { recursive: true });
+    const server = fileURLToPath(new URL("./fixtures/fake-mcp-server.mjs", import.meta.url));
+    writeFileSync(
+      join(cwd, ".tree-agent", "mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          "fake-server": {
+            command: process.execPath,
+            args: [server],
+            toolExposure: { echo: "direct", read_note: "deferred" },
+          },
+        },
+      }),
+    );
+    const terminal = new FakeTerminal();
+    const result = run(["--cwd", cwd, "--trust"], new FakeProvider({ streams: [] }), {
+      stdin: tty,
+      terminal,
+    });
+    await shown(terminal, " · 1 MCP · 0 activated");
+
+    terminal.type("/mcp");
+    terminal.send("\r");
+    await shown(terminal, "fake-server: 2 tools; direct 1, deferred 1, codemode 0 · connected");
+    terminal.send("\x03");
+
+    expect((await result).code).toBe(0);
+  });
+
   it("does not ask in a cwd listed in trusted.json", async () => {
     const cwd = join(home, "proj");
     mkdirSync(cwd, { recursive: true });
@@ -1244,6 +1292,95 @@ describe("main (mcp)", () => {
     const result = await run(["hi", "--cwd", cwd], fake);
 
     expect(result).toMatchObject({ code: 0, stderr: "" });
+  });
+
+  const exposed = () => ({
+    ...fakeServer(),
+    toolExposure: { echo: "direct", read_note: "deferred" },
+  });
+  const names = (fake: FakeProvider, i = 0) => fake.requests[i]?.tools.map((t) => t.name);
+  const BUILTINS = ["read", "bash", "edit", "write"];
+
+  it("registers the server's tools: built-ins + the direct one + tool_search, and the mcp_servers line", async () => {
+    const cwd = project();
+    writeMcp(join(cwd, ".tree-agent", "mcp.json"), { mcpServers: { "fake-server": exposed() } });
+    const fake = new FakeProvider({ streams: [textTurn("ok")] });
+
+    const result = await run(["hi", "--cwd", cwd, "--trust"], fake);
+
+    expect(result).toMatchObject({ code: 0, stderr: "" });
+    expect(names(fake)).toEqual([...BUILTINS, "mcp__fake_server__echo", "tool_search"]);
+    expect(fake.requests[0]?.context.system).toContain(
+      "<mcp_servers>\n- fake-server: 2 tools; direct 1, deferred 1, codemode 0\n</mcp_servers>",
+    );
+  });
+
+  it("the default exposure is codemode: no MCP tool and no tool_search reach the model", async () => {
+    writeMcp(join(home, "mcp.json"), { mcpServers: { fake: fakeServer() } });
+    const fake = new FakeProvider({ streams: [textTurn("ok")] });
+
+    await run(["hi", "--cwd", project()], fake);
+
+    expect(names(fake)).toEqual(BUILTINS);
+    expect(fake.requests[0]?.context.system).toContain(
+      "- fake: 2 tools; direct 0, deferred 0, codemode 2",
+    );
+  });
+
+  it("--no-mcp: exactly the 4 built-ins, no tool_search, no mcp_servers section", async () => {
+    const cwd = project();
+    writeMcp(join(cwd, ".tree-agent", "mcp.json"), { mcpServers: { "fake-server": exposed() } });
+    const fake = new FakeProvider({ streams: [textTurn("ok")] });
+
+    await run(["hi", "--cwd", cwd, "--trust", "--no-mcp"], fake);
+
+    expect(names(fake)).toEqual(BUILTINS);
+    expect(fake.requests[0]?.context.system).not.toContain("<mcp_servers>");
+    expect(fake.requests[0]?.context.system).not.toContain("tool_search");
+  });
+
+  it("--json: tool_search activates read_note, the next turn calls it, and --resume keeps it", async () => {
+    const cwd = project();
+    writeMcp(join(cwd, ".tree-agent", "mcp.json"), { mcpServers: { "fake-server": exposed() } });
+    const NOTE = "mcp__fake_server__read_note";
+    const fake = new FakeProvider({
+      streams: [
+        toolTurn({ id: "s1", name: "tool_search", arguments: { query: "read a note" } }),
+        toolTurn({ id: "n1", name: NOTE, arguments: { id: "7" } }),
+        textTurn("note 7 says hi"),
+      ],
+    });
+
+    const result = await run(["read note 7", "--cwd", cwd, "--trust", "--json"], fake);
+
+    expect(result.code).toBe(0);
+    const events = result.stdout
+      .trimEnd()
+      .split("\n")
+      .map((l) => JSON.parse(l) as AgentEvent);
+    expect(events).toContainEqual({ type: "tool_activation", names: [NOTE] });
+    expect(events).toContainEqual({
+      type: "tool_result",
+      callId: "n1",
+      content: '{"id":"7","body":"note 7"}',
+      isError: false,
+    });
+    expect(names(fake, 0)).not.toContain(NOTE);
+    expect(names(fake, 1)).toContain(NOTE);
+    // read_note is readOnlyHint: true, so the gate never asked
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "permission", source: "readOnly", decision: "allow" }),
+    );
+
+    const again = new FakeProvider({
+      streams: [toolTurn({ id: "n2", name: NOTE, arguments: { id: "8" } }), textTurn("note 8")],
+    });
+    const resumed = await run(["and 8?", "--cwd", cwd, "--trust", "--continue", "--json"], again);
+
+    expect(resumed.code).toBe(0);
+    expect(names(again, 0)).toContain(NOTE);
+    expect(resumed.stdout).not.toContain('"tool_activation"');
+    expect(resumed.stdout).toContain('{\\"id\\":\\"8\\",\\"body\\":\\"note 8\\"}');
   });
 
   it("a trusted cwd starts the project server, and .mcp.json is never parsed", async () => {

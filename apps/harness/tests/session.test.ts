@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { type RegistrableClient, registerMcpTools } from "../src/mcp/register.ts";
 import { FakeProvider, fakeDone, fakeModel } from "../src/provider/fake.ts";
 import type { Provider, StreamEvent } from "../src/provider/types.ts";
 import { AgentSession, type SessionOptions } from "../src/session.ts";
@@ -9,6 +10,7 @@ import { type Entry, SessionStore } from "../src/session-store/jsonl.ts";
 import { discoverSkills } from "../src/skills/skills.ts";
 import { builtinRegistry } from "../src/tools/builtins.ts";
 import type { ToolRegistry } from "../src/tools/registry.ts";
+import { registerToolSearch } from "../src/tools/tool-search.ts";
 import type { AgentEvent, Message, PermissionPrompter, ToolCall } from "../src/types.ts";
 import { useTmpDir } from "./helpers/tmp.ts";
 
@@ -1026,5 +1028,216 @@ describe("AgentSession skills", () => {
     expect(() => t.session.skillMessage("empty", " ")).toThrow(
       'skill "empty" has an empty body and no args; nothing sent',
     );
+  });
+});
+
+describe("AgentSession with MCP tools and tool_search", () => {
+  const sessionsDir = () => join(root(), "home", "sessions");
+  const jsonl = () => SessionStore.jsonl(sessionsDir());
+  const fileEntries = (): Entry[] => {
+    const [dir = ""] = readdirSync(sessionsDir());
+    const [file = ""] = readdirSync(join(sessionsDir(), dir));
+    return readFileSync(join(sessionsDir(), dir, file), "utf8")
+      .trimEnd()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Entry);
+  };
+  const memoryServer = (connected = true): RegistrableClient => ({
+    name: "tree-memory-local",
+    server: {
+      command: "uv",
+      args: [],
+      env: {},
+      toolExposure: { search_memory: "direct", "visualize_*": "deferred" },
+    },
+    connected,
+    tools: [
+      { name: "search_memory", description: "Search the memory.", inputSchema: { type: "object" } },
+      {
+        name: "visualize_memory_structure",
+        description: "Show how the memory is organised.",
+        inputSchema: { type: "object" },
+      },
+      {
+        name: "visualize_memory_embeddings",
+        description: "Show a 2D map of the memory's topics.",
+        inputSchema: { type: "object" },
+      },
+      { name: "ingest_url", description: "Add a web page.", inputSchema: { type: "object" } },
+      { name: "search_web", description: "Search the web.", inputSchema: { type: "object" } },
+    ],
+    callTool: async (name) => ({
+      content: [{ type: "text", text: `${name} ran` }],
+      isError: false,
+    }),
+  });
+  const mcpTools = (...clients: RegistrableClient[]) => {
+    const tools = builtinRegistry({ tmpDir: join(root(), "home", "tmp") });
+    const mcpServers = registerMcpTools(tools, clients, { tmpDir: join(root(), "home", "tmp") });
+    registerToolSearch(tools);
+    return { tools, mcpServers };
+  };
+  const STRUCTURE = "mcp__tree_memory_local__visualize_memory_structure";
+  const EMBEDDINGS = "mcp__tree_memory_local__visualize_memory_embeddings";
+  const call = (id: string, name: string, args: Record<string, unknown> = {}): ToolCall => ({
+    id,
+    name,
+    arguments: args,
+  });
+
+  it("without MCP the model sees exactly the 4 built-ins and no mcp_servers section", async () => {
+    const t = await setup([textTurn("ok")]);
+
+    await t.session.prompt("hi");
+
+    expect(t.fake.requests[0]?.tools.map((s) => s.name)).toEqual(["read", "bash", "edit", "write"]);
+    expect(t.fake.requests[0]?.context.system).not.toContain("<mcp_servers>");
+    expect(t.fake.requests[0]?.context.system).not.toContain("tool_search");
+  });
+
+  it("sends the direct MCP tool and tool_search, and lists the server's counts in mcp_servers", async () => {
+    const { tools, mcpServers } = mcpTools(memoryServer());
+    const t = await setup([textTurn("ok")], { tools, mcpServers });
+
+    await t.session.prompt("hi");
+
+    const [request] = t.fake.requests;
+    expect(request?.tools.map((s) => s.name)).toEqual([
+      "read",
+      "bash",
+      "edit",
+      "write",
+      "mcp__tree_memory_local__search_memory",
+      "tool_search",
+    ]);
+    expect(request?.context.system).toContain(
+      "<mcp_servers>\n- tree-memory-local: 5 tools; direct 1, deferred 2, codemode 2\n</mcp_servers>",
+    );
+    expect(request?.context.system).toContain(
+      "- tool_search: find more tools by describing what you need\n" +
+        "More tools are available; call `tool_search` to find them.\n</tools>",
+    );
+  });
+
+  it("status() counts the connected MCP servers", async () => {
+    const { tools, mcpServers } = mcpTools(memoryServer(), {
+      ...memoryServer(false),
+      name: "down",
+      tools: [],
+    });
+    const t = await setup([], { tools, mcpServers });
+
+    expect(t.session.mcpServers.map((s) => s.name)).toEqual(["tree-memory-local", "down"]);
+    expect(t.session.status()).toMatchObject({ mcpServers: 1, activatedTools: 0 });
+  });
+
+  it("tool_search activates the visualize tools: next request, tools section, event, entry on disk", async () => {
+    const { tools, mcpServers } = mcpTools(memoryServer());
+    const t = await setup(
+      [
+        toolTurn(call("s1", "tool_search", { query: "visualize memory" })),
+        toolTurn(call("v1", STRUCTURE)),
+        textTurn("here is the picture"),
+      ],
+      { tools, mcpServers, store: jsonl() },
+    );
+
+    await t.session.prompt("show me a picture of my memory");
+
+    const [first, second] = t.fake.requests;
+    expect(first?.tools.map((s) => s.name)).not.toContain(STRUCTURE);
+    expect(second?.tools.map((s) => s.name)).toEqual(
+      expect.arrayContaining([STRUCTURE, EMBEDDINGS]),
+    );
+    expect(second?.context.system).toContain(`- ${STRUCTURE}: Show how the memory is organised.`);
+    const types = t.events.map((e) =>
+      e.type === "tool_result" ? `${e.type}:${e.callId}` : e.type,
+    );
+    const activation = types.indexOf("tool_activation");
+    expect(activation).toBeGreaterThan(types.indexOf("tool_call"));
+    expect(activation).toBeLessThan(types.indexOf("tool_result:s1"));
+    expect(t.events).toContainEqual({ type: "tool_activation", names: [STRUCTURE, EMBEDDINGS] });
+    expect(t.events).toContainEqual({
+      type: "tool_result",
+      callId: "v1",
+      content: "visualize_memory_structure ran",
+      isError: false,
+    });
+    expect(t.session.status().activatedTools).toBe(2);
+    const onDisk = fileEntries();
+    expect(onDisk.filter((e) => e.type === "tool_activation")).toEqual([
+      expect.objectContaining({ names: [STRUCTURE, EMBEDDINGS] }),
+    ]);
+    // after the assistant message that asked (and the readOnly
+    // permission), before its tool result
+    const kinds = onDisk.map((e) => (e.type === "message" ? e.message.role : e.type));
+    expect(kinds.slice(0, 6)).toEqual([
+      "session",
+      "user",
+      "assistant",
+      "permission",
+      "tool_activation",
+      "tool",
+    ]);
+  });
+
+  it("a second search for already-activated tools writes no new activation", async () => {
+    const { tools, mcpServers } = mcpTools(memoryServer());
+    const t = await setup(
+      [
+        toolTurn(call("s1", "tool_search", { query: "visualize memory" })),
+        toolTurn(call("s2", "tool_search", { query: "visualize memory" })),
+        textTurn("ok"),
+      ],
+      { tools, mcpServers, store: jsonl() },
+    );
+
+    await t.session.prompt("go");
+
+    expect(t.events.filter((e) => e.type === "tool_activation")).toHaveLength(1);
+    expect(fileEntries().filter((e) => e.type === "tool_activation")).toHaveLength(1);
+  });
+
+  it("--resume restores the activation: listed and sent without a new tool_search", async () => {
+    const first = mcpTools(memoryServer());
+    const a = await setup(
+      [toolTurn(call("s1", "tool_search", { query: "embeddings map" })), textTurn("found it")],
+      { tools: first.tools, mcpServers: first.mcpServers, store: jsonl() },
+    );
+    await a.session.prompt("find the map tool");
+    const id = a.session.id ?? "";
+
+    const again = mcpTools(memoryServer());
+    const b = await setup([toolTurn(call("e1", EMBEDDINGS)), textTurn("map")], {
+      tools: again.tools,
+      mcpServers: again.mcpServers,
+      store: jsonl(),
+      resume: id,
+    });
+
+    expect(b.session.toolNames()).toContain(EMBEDDINGS);
+    expect(b.session.status().activatedTools).toBe(1);
+    await b.session.prompt("draw it");
+
+    expect(b.fake.requests[0]?.tools.map((s) => s.name)).toContain(EMBEDDINGS);
+    expect(b.fake.requests[0]?.context.system).toContain(`- ${EMBEDDINGS}:`);
+    expect(b.events.filter((e) => e.type === "tool_activation")).toEqual([]);
+    expect(b.events).toContainEqual(
+      expect.objectContaining({ type: "tool_result", callId: "e1", isError: false }),
+    );
+    expect(fileEntries().filter((e) => e.type === "tool_activation")).toHaveLength(1);
+  });
+
+  it("clear() forgets the activation; a new search announces it again", async () => {
+    const { tools, mcpServers } = mcpTools(memoryServer());
+    const search = toolTurn(call("s1", "tool_search", { query: "visualize" }));
+    const t = await setup([search, textTurn("a"), search, textTurn("b")], { tools, mcpServers });
+
+    await t.session.prompt("one");
+    t.session.clear();
+    expect(t.session.toolNames()).not.toContain(STRUCTURE);
+    await t.session.prompt("two");
+
+    expect(t.events.filter((e) => e.type === "tool_activation")).toHaveLength(2);
   });
 });

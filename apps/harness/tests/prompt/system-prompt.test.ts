@@ -9,6 +9,8 @@ import {
   cwdSection,
   DEFAULT_PREAMBLE,
   loadPreamble,
+  MORE_TOOLS,
+  mcpServersSection,
   RULES,
   rulesSection,
   SECTION_ORDER,
@@ -18,6 +20,7 @@ import {
 } from "../../src/prompt/system-prompt.ts";
 import type { Skill } from "../../src/skills/skills.ts";
 import { builtinRegistry } from "../../src/tools/builtins.ts";
+import { toolSearchTool } from "../../src/tools/tool-search.ts";
 import { useTmpDir } from "../helpers/tmp.ts";
 
 const home = useTmpDir("prompt-home");
@@ -104,6 +107,50 @@ describe("toolsSection", () => {
     };
 
     expect(toolsSection([tool])).toBe("- grep: search files");
+  });
+});
+
+describe("toolsSection with tool_search", () => {
+  it("adds the more-tools sentence when tool_search is declared, not otherwise", () => {
+    const registry = builtinRegistry({ tmpDir: "/tmp/x" });
+    const without = toolsSection(registry.declared());
+    registry.register(toolSearchTool(registry));
+
+    const withSearch = toolsSection(registry.declared());
+
+    expect(without).not.toContain(MORE_TOOLS);
+    expect(MORE_TOOLS).toBe("More tools are available; call `tool_search` to find them.");
+    expect(withSearch.split("\n").slice(-2)).toEqual([
+      "- tool_search: find more tools by describing what you need",
+      MORE_TOOLS,
+    ]);
+  });
+});
+
+describe("mcpServersSection", () => {
+  const server = (name: string, direct: number, deferred: number, codemode: number) => ({
+    name,
+    client: { connected: true },
+    tools: direct + deferred + codemode,
+    direct,
+    deferred,
+    codemode,
+  });
+
+  it("writes `- <name>: <N> tools; direct a, deferred b, codemode c` per server, keeping the config key", () => {
+    expect(mcpServersSection([server("tree-memory-local", 1, 2, 8), server("gh", 0, 0, 30)])).toBe(
+      [
+        "- tree-memory-local: 11 tools; direct 1, deferred 2, codemode 8",
+        "- gh: 30 tools; direct 0, deferred 0, codemode 30",
+      ].join("\n"),
+    );
+  });
+
+  it("is empty (the section is omitted) without servers", () => {
+    expect(mcpServersSection([])).toBe("");
+    expect(buildSystemPrompt({ ...ALL, mcp_servers: mcpServersSection([]) })).not.toContain(
+      "<mcp_servers>",
+    );
   });
 });
 

@@ -1,6 +1,30 @@
 // Output caps shared by the tools and the session's afterToolCall.
 
+import { randomUUID } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
 export const MAX_OUTPUT_BYTES = 50 * 1024;
+
+// `text` within maxBytes, or its head and tail with the full text
+// saved to <tmpDir>/<id>.txt and the path appended (as bash does).
+// A file that cannot be written is named as such, not thrown.
+export function spillOver(
+  text: string,
+  maxBytes: number,
+  tmpDir: string,
+): string {
+  const cut = headTail(text, maxBytes);
+  if (cut === text) return text;
+  try {
+    mkdirSync(tmpDir, { recursive: true });
+    const file = join(tmpDir, `${randomUUID()}.txt`);
+    writeFileSync(file, text);
+    return `${cut}\n\nFull output: ${file}`;
+  } catch (err) {
+    return `${cut}\n\ncould not save full output: ${(err as Error).message}`;
+  }
+}
 
 // Keeps the first and last maxBytes / 2 of `text` around a marker
 // naming how much was cut.

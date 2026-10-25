@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "tree-memory-local": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "apps/memory",
+        "run",
+        "--env-file",
+        "../../.env",
+        "python",
+        "scripts/serve_mcp.py"
+      ],
+      "env": {
+        "ENV_FILE_PATH": "../../.env"
+      },
+      "toolExposure": {
+        "search_memory": "direct",
+        "visualize_*": "deferred"
+      }
+    }
+  }
+}

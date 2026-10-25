@@ -4,8 +4,10 @@
 
 import { readFile } from "node:fs/promises";
 import { userPaths } from "../config/paths.ts";
+import type { McpServerInfo } from "../mcp/register.ts";
 import type { Skill } from "../skills/skills.ts";
 import type { ToolDefinition } from "../tools/registry.ts";
+import { TOOL_SEARCH } from "../tools/tool-search.ts";
 
 export interface PromptSections {
   preamble: string;
@@ -56,9 +58,30 @@ export function buildSystemPrompt(s: PromptSections): string {
   return parts.join("\n\n");
 }
 
-// `- name: promptSnippet` per declared (direct ∪ activated) tool.
+export const MORE_TOOLS =
+  "More tools are available; call `tool_search` to find them.";
+
+// `- name: promptSnippet` per declared (direct ∪ activated) tool,
+// plus MORE_TOOLS when tool_search is one of them.
 export function toolsSection(tools: ToolDefinition[]): string {
-  return tools.map((t) => `- ${t.name}: ${t.promptSnippet}`).join("\n");
+  const lines = tools.map((t) => `- ${t.name}: ${t.promptSnippet}`);
+  if (tools.some((t) => t.name === TOOL_SEARCH)) lines.push(MORE_TOOLS);
+  return lines.join("\n");
+}
+
+// `- <name>: <N> tools; direct a, deferred b, codemode c` per
+// configured server (none: no section).
+export function mcpServersSection(
+  servers: readonly McpServerInfo[],
+): string {
+  return servers.map((s) => `- ${serverLine(s)}`).join("\n");
+}
+
+export function serverLine(s: McpServerInfo): string {
+  return (
+    `${s.name}: ${s.tools} tools; direct ${s.direct}, ` +
+    `deferred ${s.deferred}, codemode ${s.codemode}`
+  );
 }
 
 export function rulesSection(): string {

@@ -27,7 +27,7 @@ export const Exposure = z.enum([
 
 export const McpServer = z.union([Stdio, Http]).and(
   z.object({
-    // glob → exposure, first match wins (applied in task 209)
+    // glob → exposure, first match wins (mcp/register.ts)
     toolExposure: z.record(Exposure).default({}),
   }),
 );
@@ -63,20 +63,31 @@ export function parseMcpConfig(
   raw: unknown,
   source: string,
 ): z.infer<typeof McpConfig> {
-  const top = z.object({ mcpServers: z.record(z.unknown()) });
-  const parsed = top.safeParse(raw);
-  if (!parsed.success) {
-    throw new McpConfigError(`${source}: ${describe(parsed.error)}`);
+  if (!isObject(raw)) {
+    throw new McpConfigError(`${source}: must be an object`);
   }
-  const mcpServers: Record<string, McpServer> = {};
-  for (const [name, entry] of Object.entries(parsed.data.mcpServers)) {
+  // Iterated by hand: z.record() drops a server named `__proto__`.
+  const servers = raw.mcpServers;
+  if (!isObject(servers)) {
+    const what =
+      servers === undefined ? "is required" : "must be an object";
+    throw new McpConfigError(`${source}: mcpServers ${what}`);
+  }
+  const mcpServers: Record<string, McpServer> = Object.create(null);
+  for (const [name, entry] of Object.entries(servers)) {
     const problem = (text: string) =>
       new McpConfigError(`${source}: server "${name}": ${text}`);
+    if (!name) throw problem("name must not be empty");
     if (isObject(entry) && "command" in entry && "url" in entry) {
       throw problem("set command (stdio) or url (HTTP), not both");
     }
     const result = McpServer.safeParse(entry);
     if (!result.success) throw problem(describe(result.error, entry));
+    // z.string().url() takes any scheme (ftp:, file:); the transport
+    // speaks HTTP only.
+    if ("url" in result.data && !/^https?:\/\//i.test(result.data.url)) {
+      throw problem("url must start with http:// or https://");
+    }
     mcpServers[name] = result.data;
   }
   return { mcpServers };

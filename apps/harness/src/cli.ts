@@ -19,12 +19,14 @@ import {
 import { isTrusted, trustDirectory } from "./config/trust.ts";
 import { type Out, runHeadless, type Signals } from "./headless/print.ts";
 import { type McpClient, type StartMcp, startMcp } from "./mcp/client.ts";
+import { type McpServerInfo, registerMcpTools } from "./mcp/register.ts";
 import { OpenRouterProvider } from "./provider/openrouter.ts";
 import type { Provider } from "./provider/types.ts";
 import { AgentSession } from "./session.ts";
 import { SessionStore } from "./session-store/jsonl.ts";
 import type { DiscoverSkills } from "./skills/skills.ts";
 import { builtinRegistry } from "./tools/builtins.ts";
+import { registerToolSearch } from "./tools/tool-search.ts";
 import { runTui } from "./tui/app.ts";
 import type { PermissionMode, PermissionPrompter } from "./types.ts";
 
@@ -148,16 +150,22 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
       });
       const provider = (deps.createProvider ?? openRouter)(apiKey);
       await checkDecisionModel(provider, settings);
+      const { tmp: tmpDir } = userPaths(env);
+      const tools = builtinRegistry({ tmpDir, env });
+      let mcpServers: McpServerInfo[] = [];
       if (args.mcp) {
         const start = deps.startMcp ?? startMcp;
-        mcpClients.push(
-          ...(await start({ env, cwd, trusted: projectTrusted })),
-        );
+        const clients = await start({ env, cwd, trusted: projectTrusted });
+        mcpClients.push(...clients);
+        // Before create(): a resumed session re-activates by name.
+        mcpServers = registerMcpTools(tools, clients, { tmpDir });
+        registerToolSearch(tools);
       }
       const session = await AgentSession.create({
         provider,
         model: settings.model,
-        tools: builtinRegistry({ tmpDir: userPaths(env).tmp, env }),
+        tools,
+        mcpServers,
         cwd,
         maxTurns: args.maxTurns,
         trusted: projectTrusted,

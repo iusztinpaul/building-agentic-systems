@@ -30,6 +30,10 @@ export interface ToolDefinition<S extends z.AnyZodObject = z.AnyZodObject> {
   description: string; // the provider tools array
   promptSnippet: string; // one line in the `tools` prompt section
   parameters: S;
+  // Sent to the provider instead of `parameters` as JSON Schema: an
+  // MCP tool's own inputSchema (its zod `parameters` only checks
+  // "an object"; the server validates the rest).
+  inputSchema?: JsonSchema;
   exposure: Exposure;
   isReadOnly: boolean; // permission gate step 1 (task 206)
   // A method, so a ToolDefinition<{path}> fits a registry of any.
@@ -86,7 +90,7 @@ export class ToolRegistry {
     return this.declared().map((tool) => ({
       name: tool.name,
       description: tool.description,
-      parameters: toJsonSchema(tool.parameters),
+      parameters: tool.inputSchema ?? toJsonSchema(tool.parameters),
     }));
   }
 

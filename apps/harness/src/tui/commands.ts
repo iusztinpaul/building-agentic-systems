@@ -1,9 +1,10 @@
 // The slash commands of this milestone. Each one is a call on
-// AgentSession's public API plus the lines the TUI shows; /mcp (209)
-// and /compact (212) join later. /skill:<name> [args] answers with
+// AgentSession's public API plus the lines the TUI shows; /compact
+// (212) joins later. /skill:<name> [args] answers with
 // the prompt to run (the SKILL.md body + args) instead of lines.
 
 import type { SlashCommand } from "@earendil-works/pi-tui";
+import { serverLine } from "../prompt/system-prompt.ts";
 import type { AgentSession } from "../session.ts";
 
 export const COMMANDS: SlashCommand[] = [
@@ -15,6 +16,7 @@ export const COMMANDS: SlashCommand[] = [
     argumentHint: "ask|auto",
   },
   { name: "tools", description: "the tools the model can call" },
+  { name: "mcp", description: "MCP servers, their tools and state" },
   { name: "reload", description: "re-read AGENTS.md / CLAUDE.md" },
   { name: "clear", description: "start a new session" },
   { name: "exit", description: "quit" },
@@ -85,6 +87,8 @@ async function run(
       const names = session.toolNames();
       return { lines: [`tools (${names.length}): ${names.join(", ")}`] };
     }
+    case "mcp":
+      return { lines: mcpLines(session) };
     case "reload": {
       await session.reload();
       const n = session.contextFiles.length;
@@ -102,6 +106,19 @@ async function run(
         error: true,
       };
   }
+}
+
+// One line per server of the mcp.json files (never .mcp.json).
+function mcpLines(session: AgentSession): string[] {
+  const servers = session.mcpServers;
+  return [
+    `MCP servers (${servers.length})${servers.length ? ":" : ""}`,
+    ...servers.map(
+      (s) =>
+        `  ${serverLine(s)} · ` +
+        (s.client.connected ? "connected" : "not connected"),
+    ),
+  ];
 }
 
 function help(session: AgentSession): string[] {

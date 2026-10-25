@@ -8,6 +8,7 @@
 import { log } from "./log.ts";
 import { BLOCKED, runLoop } from "./loop/agent-loop.ts";
 import type { GateResult, LoopHooks } from "./loop/hooks.ts";
+import type { McpServerInfo } from "./mcp/register.ts";
 import {
   type Classifier,
   type DangerCheck,
@@ -23,6 +24,7 @@ import {
   buildSystemPrompt,
   cwdSection,
   loadPreamble,
+  mcpServersSection,
   rulesSection,
   skillsSection,
   toolsSection,
@@ -70,6 +72,8 @@ export interface SessionOptions {
   // Absent or null (--no-skills): no discovery, no `skills` section.
   // The listing may take budgetRatio × the model's contextLength.
   skills?: { budgetRatio: number; discover?: DiscoverSkills } | null;
+  // The configured MCP servers, their tools already in `tools`.
+  mcpServers?: readonly McpServerInfo[];
 
   now?: () => Date;
 }
@@ -83,7 +87,7 @@ export interface SessionStatus {
   tokens: number | undefined;
   contextLength: number;
   cost: number; // USD, usage × the model's pricing
-  mcpServers: number;
+  mcpServers: number; // connected now
   activatedTools: number;
 }
 
@@ -113,6 +117,8 @@ export class AgentSession {
   readonly #sessionAllow = new Set<string>();
   readonly #verdicts = new Map<string, DangerCheck>();
   readonly #classifier: Classifier;
+  // Activations already saved and shown (restored ones included).
+  readonly #announced = new Set<string>();
 
   private constructor(o: SessionOptions) {
     this.#o = o;
@@ -141,6 +147,7 @@ export class AgentSession {
     this.#context = { system: "", messages: restored.messages };
     this.#saved = restored.messages.length;
     this.#o.tools.activate(restored.activated);
+    for (const name of this.#o.tools.activated()) this.#announced.add(name);
     this.#tokens = lastInputTokens(restored.messages);
     const prices = new Map<string, ModelInfo["pricing"]>();
     for (const { model, usage } of restored.spend) {
@@ -260,9 +267,13 @@ export class AgentSession {
       tokens: this.#tokens,
       contextLength: this.#info?.contextLength ?? 0,
       cost: this.#cost,
-      mcpServers: 0, // the MCP client arrives in task 209
+      mcpServers: this.mcpServers.filter((s) => s.client.connected).length,
       activatedTools: this.#o.tools.activated().length,
     };
+  }
+
+  get mcpServers(): readonly McpServerInfo[] {
+    return this.#o.mcpServers ?? [];
   }
 
   // What the model sees: direct ∪ activated tool names.
@@ -301,6 +312,7 @@ export class AgentSession {
     this.#steering.length = 0;
     this.#followUps.length = 0;
     this.#o.tools.deactivateAll();
+    this.#announced.clear();
     this.#tokens = undefined;
     this.#cost = 0;
     this.#sessionAllow.clear();
@@ -371,6 +383,7 @@ export class AgentSession {
       rules: rulesSection(),
       project_context: formatContextFiles(this.#contextFiles),
       skills: this.#skillsListing.text,
+      mcp_servers: mcpServersSection(this.mcpServers),
       cwd: cwdSection(this.#o.cwd, (this.#o.now ?? now)()),
     });
   }
@@ -386,7 +399,10 @@ export class AgentSession {
         return this.#context;
       },
       beforeToolCall: (call) => this.#gate(call),
-      afterToolCall: async (_call, result) => capResult(result),
+      afterToolCall: async (_call, result) => {
+        this.#announceActivation();
+        return capResult(result);
+      },
       getSteeringMessages: () => this.#steering.splice(0),
       getFollowUpMessages: () => this.#followUps.splice(0),
       emit: (event) => this.#emit(event),
@@ -429,6 +445,19 @@ export class AgentSession {
       this.#run?.abort(BLOCKED); // the rest of the batch does not run
     }
     return { run: false, reason: reason ?? USER_DENIED };
+  }
+
+  // tool_search activated tools: saved (restored by --resume) and
+  // shown once, before the result that reports them.
+  #announceActivation(): void {
+    const names = this.#o.tools
+      .activated()
+      .filter((name) => !this.#announced.has(name));
+    if (names.length === 0) return;
+    for (const name of names) this.#announced.add(name);
+    this.#persist();
+    this.#append({ type: "tool_activation", names });
+    this.#emit({ type: "tool_activation", names });
   }
 
   // The loop pushes a message before the event that reports it

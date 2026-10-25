@@ -51,6 +51,15 @@ describe("textSink", () => {
     ]);
   });
 
+  it("names activated tools on stderr", () => {
+    const s = sinks();
+
+    s.text({ type: "tool_activation", names: ["mcp__m__a", "mcp__m__b"] });
+
+    expect(s.out).toEqual([]);
+    expect(s.err).toEqual(["activated: mcp__m__a, mcp__m__b\n"]);
+  });
+
   it("prints errors and a non-completed end to stderr", () => {
     const s = sinks();
 

@@ -1,6 +1,7 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadMcpConfig, McpConfig, McpConfigError, parseMcpConfig } from "../../src/mcp/config.ts";
 
@@ -141,6 +142,37 @@ describe("parseMcpConfig errors name the server and the key", () => {
     expect(() => parseMcpConfig({}, "mcp.json")).toThrow("mcp.json: mcpServers is required");
   });
 
+  it("rejects a url whose scheme is not http or https", () => {
+    expect(parse({ ftp: { url: "ftp://files.example.com/mcp" } })).toThrow(
+      'mcp.json: server "ftp": url must start with http:// or https://',
+    );
+    expect(parse({ ok: { url: "HTTP://localhost:8000/mcp" } })).not.toThrow();
+  });
+
+  it("keeps a server named __proto__ (an own key, not the prototype)", () => {
+    const raw = JSON.parse(
+      '{"mcpServers": {"__proto__": {"command": "uv"}, "b": {"command": "x"}}}',
+    );
+
+    const { mcpServers } = parseMcpConfig(raw, "mcp.json");
+
+    expect(Object.keys(mcpServers)).toEqual(["__proto__", "b"]);
+    expect(Object.getOwnPropertyDescriptor(mcpServers, "__proto__")?.value).toMatchObject({
+      command: "uv",
+    });
+  });
+
+  it("rejects an empty server key", () => {
+    expect(parse({ "": { command: "uv" } })).toThrow('mcp.json: server "": name must not be empty');
+  });
+
+  it("names a non-object top level or mcpServers", () => {
+    expect(() => parseMcpConfig([], "mcp.json")).toThrow("mcp.json: must be an object");
+    expect(() => parseMcpConfig({ mcpServers: [] }, "mcp.json")).toThrow(
+      "mcp.json: mcpServers must be an object",
+    );
+  });
+
   it("throws McpConfigError", () => {
     expect(parse({ s: {} })).toThrow(McpConfigError);
   });
@@ -207,9 +239,41 @@ describe("loadMcpConfig", () => {
     );
   });
 
+  it("names the file for an empty server key", async () => {
+    write(userFile(), { mcpServers: { "": { command: "x" } } });
+
+    await expect(load({ env: env() })).rejects.toThrow(
+      `${userFile()}: server "": name must not be empty`,
+    );
+  });
+
   it("names the file on invalid JSON", async () => {
     write(userFile(), "{ nope");
 
     await expect(load({ env: env() })).rejects.toThrow(`${userFile()}: invalid JSON`);
+  });
+});
+
+describe("the committed .tree-agent/mcp.json (repo root)", () => {
+  const file = fileURLToPath(new URL("../../../../.tree-agent/mcp.json", import.meta.url));
+
+  it("has tree-memory-local only: the .mcp.json command, search_memory direct, visualize_* deferred", () => {
+    const { mcpServers } = parseMcpConfig(JSON.parse(readFileSync(file, "utf8")), file);
+
+    expect(Object.keys(mcpServers)).toEqual(["tree-memory-local"]);
+    expect(mcpServers["tree-memory-local"]).toEqual({
+      command: "uv",
+      args: [
+        "--directory",
+        "apps/memory",
+        "run",
+        "--env-file",
+        "../../.env",
+        "python",
+        "scripts/serve_mcp.py",
+      ],
+      env: { ENV_FILE_PATH: "../../.env" },
+      toolExposure: { search_memory: "direct", "visualize_*": "deferred" },
+    });
   });
 });

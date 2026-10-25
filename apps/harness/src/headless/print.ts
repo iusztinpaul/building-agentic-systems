@@ -93,6 +93,8 @@ export function textSink(
     } else if (event.type === "tool_result" && event.isError) {
       const first = event.content.split("\n")[0] ?? "";
       stderr.write(`! ${clip(first, 200)}\n`);
+    } else if (event.type === "tool_activation") {
+      stderr.write(`activated: ${event.names.join(", ")}\n`);
     } else if (event.type === "error") {
       stderr.write(`${event.message}\n`);
     } else if (event.type === "agent_end") {

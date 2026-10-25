@@ -2,6 +2,7 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
+import type { McpServerInfo } from "../../src/mcp/register.ts";
 import { FakeProvider, fakeDone, fakeModel } from "../../src/provider/fake.ts";
 import type { StreamEvent } from "../../src/provider/types.ts";
 import { AgentSession } from "../../src/session.ts";
@@ -13,7 +14,11 @@ import { useTmpDir } from "../helpers/tmp.ts";
 const root = useTmpDir("commands");
 const textTurn = (text: string): StreamEvent[] => [fakeDone(text)];
 
-async function setup(streams: StreamEvent[][] = [], trusted = true) {
+async function setup(
+  streams: StreamEvent[][] = [],
+  trusted = true,
+  mcpServers: McpServerInfo[] = [],
+) {
   const home = join(root(), "home");
   const cwd = join(root(), "repo");
   mkdirSync(home, { recursive: true });
@@ -43,6 +48,7 @@ async function setup(streams: StreamEvent[][] = [], trusted = true) {
     contextMaxChars: 40_000,
     env: { TREE_AGENT_HOME: home },
     store: SessionStore.jsonl(sessions),
+    mcpServers,
   });
   const files = () =>
     readdirSync(sessions).flatMap((d) =>
@@ -102,6 +108,35 @@ describe("runCommand", () => {
     expect(await runCommand(t.session, "tools", "")).toEqual({
       lines: ["tools (5): read, bash, edit, write, mcp__x__lookup"],
     });
+  });
+
+  it("/mcp lists each server with its counts and connection state", async () => {
+    const t = await setup([], true, [
+      {
+        name: "tree-memory-local",
+        client: { connected: true },
+        tools: 11,
+        direct: 1,
+        deferred: 2,
+        codemode: 8,
+      },
+      { name: "down", client: { connected: false }, tools: 0, direct: 0, deferred: 0, codemode: 0 },
+    ]);
+
+    expect(await runCommand(t.session, "mcp", "")).toEqual({
+      lines: [
+        "MCP servers (2):",
+        "  tree-memory-local: 11 tools; direct 1, deferred 2, codemode 8 · connected",
+        "  down: 0 tools; direct 0, deferred 0, codemode 0 · not connected",
+      ],
+    });
+  });
+
+  it("/mcp with no servers says 0", async () => {
+    const t = await setup();
+
+    expect(await runCommand(t.session, "mcp", "")).toEqual({ lines: ["MCP servers (0)"] });
+    expect(COMMANDS.map((c) => c.name)).toContain("mcp");
   });
 
   it("/reload re-reads AGENTS.md: the change is in the next recorded system prompt", async () => {
