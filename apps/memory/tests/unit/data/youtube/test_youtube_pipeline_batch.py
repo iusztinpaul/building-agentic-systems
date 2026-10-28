@@ -2,9 +2,10 @@
 
 The unified flow FLATTENS a shard's RSS feeds (expanded to per-video items) and single
 videos into one ``[(canonical_url, VideoMetadata)]`` list, then runs the SHARED bulk
-core ONCE — so there is exactly ONE ``fetch_many`` over feeds + loose videos combined.
-Resolve (feed-expand vs oEmbed) and the bulk core are mocked here; their internals are
-covered by ``test_youtube.py`` / ``test_youtube_pipeline_bulk.py``.
+core once per ``app_config.data.batch_size`` chunk — one ``fetch_many`` per chunk over
+feeds + loose videos combined. Resolve (feed-expand vs oEmbed) and the bulk core are
+mocked here; their internals are covered by ``test_youtube.py`` /
+``test_youtube_pipeline_bulk.py``.
 """
 
 from __future__ import annotations
@@ -17,16 +18,21 @@ from pydantic import SecretStr
 
 import tree.data.youtube.youtube_pipeline as youtube_pipeline
 import tree.data.youtube.youtube_pipeline_batch as yt
+from tree.config.app_config import DataConfig, app_config
 from tree.config.sources import (
     YouTubeRssSource,
     YouTubeVideoSource,
 )
 from tree.config.settings import settings
+from tree.data.batch import track_item_failures
+from tree.data.web.web_scraper_api import BrightDataTimeoutError
 from tree.data.youtube.types import (
     FetchedTranscript,
     TranscriptSegment,
     VideoMetadata,
 )
+from tree.data.youtube.youtube import INVALID_URL_ERROR
+from tree.entities.documents import Document
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
@@ -53,8 +59,8 @@ def _patch_bulk(mocker) -> AsyncMock:
 
 
 async def test_flattens_feeds_and_videos_into_one_bulk_call(mocker) -> None:
-    # Two feeds (2 + 1 items) + two single videos → ONE _batch_build_and_load over the
-    # combined 5 items (the single-fetch_many win).
+    # Two feeds (2 + 1 items) + two single videos fit one default-size chunk → ONE
+    # _batch_build_and_load over the combined 5 items.
     feed_items = {
         "feed://A": [
             (_canonical("aaaaaaaaaa1"), _meta("aaaaaaaaaa1")),
@@ -91,7 +97,7 @@ async def test_flattens_feeds_and_videos_into_one_bulk_call(mocker) -> None:
     bulk.assert_awaited_once()
     items, user_id = bulk.await_args.args
     assert user_id == _USER_ID
-    assert len(items) == 5  # 3 from feeds + 2 single videos, in ONE call
+    assert len(items) == 5  # 3 from feeds + 2 single videos, in one chunk
     assert result == ["doc"]
 
 
@@ -147,7 +153,7 @@ async def test_no_resolvable_items_skips_bulk(mocker) -> None:
     bulk.assert_not_awaited()
 
 
-# --- Headline: ONE fetch_many over feeds + loose videos (the unification win) ---
+# --- Headline: feeds + loose videos share each chunk's fetch_many ---
 
 
 class _FakeFetcher:
@@ -181,9 +187,9 @@ def _transcript(video_id: str) -> FetchedTranscript:
 
 async def test_one_fetch_many_over_feeds_and_loose_videos(mocker) -> None:
     # The whole point of the unification: a worker with channel feeds + loose videos
-    # issues EXACTLY ONE fetch_many over the COMBINED url list (was one-per-feed + one
-    # for the loose videos). Uses the REAL _batch_build_and_load with a fake PRIMARY
-    # (Bright Data) fetcher — no live call, and Gemini is never needed.
+    # that fit one chunk issues EXACTLY ONE fetch_many over the COMBINED url list (was
+    # one-per-feed + one for the loose videos). Uses the REAL _batch_build_and_load
+    # with a fake PRIMARY (Bright Data) fetcher — no live call, Gemini never needed.
     feed_vids = ["aaaaaaaaaaa", "bbbbbbbbbbb"]
     loose_vid = "ccccccccccc"
 
@@ -226,3 +232,208 @@ async def test_one_fetch_many_over_feeds_and_loose_videos(mocker) -> None:
     assert len(fake.calls[0]) == 3  # 2 feed videos + 1 loose video, combined
     assert len(result) == 3
     gemini_ctor.assert_not_called()  # the primary covered every slot
+
+
+# --- Chunked streaming: one bulk core run per ``data.batch_size`` chunk ---
+
+
+def _video_ids(count: int) -> list[str]:
+    return [f"vid{i:08d}" for i in range(count)]
+
+
+class _FailingChunkFetcher(_FakeFetcher):
+    """A Bright Data stand-in that times out on any chunk holding ``poison``."""
+
+    def __init__(
+        self, transcripts: dict[str, FetchedTranscript | None], *, poison: str
+    ) -> None:
+        super().__init__(transcripts)
+        self.poison = poison
+
+    async def fetch_many(self, urls: list[str]) -> list[FetchedTranscript | None]:
+        if any(self.poison in url for url in urls):
+            self.calls.append(list(urls))
+            raise BrightDataTimeoutError("collection not ready")
+        return await super().fetch_many(urls)
+
+
+@pytest.fixture
+def _batch_size_two(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(app_config, "data", DataConfig(batch_size=2))
+
+
+@pytest.fixture
+def _real_core(mocker) -> None:
+    """Run the REAL bulk core: oEmbed resolve echoes the URL, load echoes the doc."""
+
+    mocker.patch.object(
+        yt,
+        "_resolve_video_item",
+        new_callable=AsyncMock,
+        side_effect=lambda url: (url, _meta(url.rsplit("=", 1)[-1])),
+    )
+    mocker.patch.object(settings, "brightdata_api_key", SecretStr("bd-key"))
+    mocker.patch.object(settings, "google_api_key", SecretStr("gemini-key"))
+
+
+def _patch_load(mocker) -> AsyncMock:
+    return mocker.patch.object(
+        youtube_pipeline,
+        "load_video_document",
+        new_callable=AsyncMock,
+        side_effect=lambda doc: doc,
+    )
+
+
+@pytest.mark.usefixtures("_batch_size_two", "_real_core")
+async def test_transcripts_are_fetched_and_loaded_once_per_chunk(mocker) -> None:
+    ids = _video_ids(5)
+    fake = _FakeFetcher({v: _transcript(v) for v in ids})
+    mocker.patch.object(
+        youtube_pipeline, "BrightDataTranscriptFetcher", return_value=fake
+    )
+    load = mocker.patch.object(
+        youtube_pipeline,
+        "load_batch",
+        new_callable=AsyncMock,
+        side_effect=lambda docs: list(docs),
+    )
+
+    result = await yt.ingest_youtube_batch.fn(
+        [YouTubeVideoSource(uri=_canonical(v)) for v in ids], _USER_ID
+    )
+
+    assert [len(urls) for urls in fake.calls] == [2, 2, 1]
+    assert [len(call.args[0]) for call in load.await_args_list] == [2, 2, 1]
+    assert [doc.source_uri for doc in result] == [_canonical(v) for v in ids]
+
+
+@pytest.mark.usefixtures("_real_core")
+async def test_chunked_result_equals_the_single_chunk_result(
+    mocker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ids = _video_ids(5)
+    mocker.patch.object(
+        youtube_pipeline,
+        "BrightDataTranscriptFetcher",
+        side_effect=lambda: _FakeFetcher({v: _transcript(v) for v in ids}),
+    )
+    _patch_load(mocker)
+    entries = [YouTubeVideoSource(uri=_canonical(v)) for v in ids]
+
+    monkeypatch.setattr(app_config, "data", DataConfig(batch_size=2))
+    chunked = await yt.ingest_youtube_batch.fn(entries, _USER_ID)
+    monkeypatch.setattr(app_config, "data", DataConfig(batch_size=500))
+    single = await yt.ingest_youtube_batch.fn(entries, _USER_ID)
+
+    assert [doc.source_uri for doc in chunked] == [doc.source_uri for doc in single]
+    assert len(chunked) == 5
+
+
+@pytest.mark.usefixtures("_batch_size_two", "_real_core")
+async def test_invalid_url_rows_are_written_exactly_once_across_chunks(
+    mocker,
+) -> None:
+    ids = _video_ids(5)
+    invalid = ["https://example.com/not-youtube", "not a url"]
+    mocker.patch.object(
+        youtube_pipeline,
+        "BrightDataTranscriptFetcher",
+        return_value=_FakeFetcher({v: _transcript(v) for v in ids}),
+    )
+    load = _patch_load(mocker)
+
+    await yt.ingest_youtube_batch.fn(
+        [
+            *(YouTubeVideoSource(uri=_canonical(v)) for v in ids),
+            *(YouTubeVideoSource(uri=raw) for raw in invalid),
+        ],
+        _USER_ID,
+    )
+
+    loaded: list[Document] = [call.args[0] for call in load.await_args_list]
+    invalid_rows = [d.source_uri for d in loaded if d.ingest_error == INVALID_URL_ERROR]
+    assert sorted(invalid_rows) == sorted(invalid)
+
+
+@pytest.mark.usefixtures("_batch_size_two", "_real_core")
+async def test_a_bright_data_failure_falls_back_only_its_chunk(mocker) -> None:
+    # Chunks [v0, v1 | v2, v3 | v4]: Bright Data times out on chunk 2 only, so only
+    # v2 + v3 go to Gemini; chunks 1 and 3 keep their Bright Data transcripts.
+    ids = _video_ids(5)
+    brightdata = _FailingChunkFetcher({v: _transcript(v) for v in ids}, poison=ids[2])
+    gemini = _FakeFetcher({v: _transcript(v) for v in ids})
+    mocker.patch.object(
+        youtube_pipeline, "BrightDataTranscriptFetcher", return_value=brightdata
+    )
+    mocker.patch.object(
+        youtube_pipeline, "GeminiTranscriptFetcher", return_value=gemini
+    )
+    _patch_load(mocker)
+
+    result = await yt.ingest_youtube_batch.fn(
+        [YouTubeVideoSource(uri=_canonical(v)) for v in ids], _USER_ID
+    )
+
+    assert [len(urls) for urls in brightdata.calls] == [2, 2, 1]
+    assert gemini.calls == [[_canonical(ids[2]), _canonical(ids[3])]]
+    assert len(result) == 5
+
+
+@pytest.mark.usefixtures("_batch_size_two", "_real_core")
+async def test_a_failure_in_one_chunk_does_not_stop_the_next(mocker) -> None:
+    # Chunks [v0, v1 | v2, v3 | v4]: one load fails in chunk 1, one in chunk 2.
+    ids = _video_ids(5)
+    failing = {_canonical(ids[0]), _canonical(ids[2])}
+    mocker.patch.object(
+        youtube_pipeline,
+        "BrightDataTranscriptFetcher",
+        return_value=_FakeFetcher({v: _transcript(v) for v in ids}),
+    )
+
+    async def fake_load(doc: Document) -> Document:
+        if doc.source_uri in failing:
+            raise RuntimeError(f"load failed: {doc.source_uri}")
+        return doc
+
+    mocker.patch.object(
+        youtube_pipeline,
+        "load_video_document",
+        new_callable=AsyncMock,
+        side_effect=fake_load,
+    )
+
+    with track_item_failures() as tally:
+        result = await yt.ingest_youtube_batch.fn(
+            [YouTubeVideoSource(uri=_canonical(v)) for v in ids], _USER_ID
+        )
+
+    assert [doc.source_uri for doc in result] == [
+        _canonical(v) for v in (ids[1], ids[3], ids[4])
+    ]
+    assert tally.count == 2
+
+
+@pytest.mark.usefixtures("_batch_size_two")
+async def test_invalid_inputs_ride_only_the_first_chunk(mocker) -> None:
+    ids = _video_ids(3)
+    mocker.patch.object(
+        yt,
+        "_resolve_video_item",
+        new_callable=AsyncMock,
+        side_effect=lambda url: (url, _meta(url.rsplit("=", 1)[-1])),
+    )
+    bulk = _patch_bulk(mocker)
+
+    await yt.ingest_youtube_batch.fn(
+        [
+            *(YouTubeVideoSource(uri=_canonical(v)) for v in ids),
+            YouTubeVideoSource(uri="not a url"),
+        ],
+        _USER_ID,
+    )
+
+    assert [call.kwargs["invalid_inputs"] for call in bulk.await_args_list] == [
+        ["not a url"],
+        None,
+    ]

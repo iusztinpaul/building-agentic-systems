@@ -2,10 +2,12 @@
 
 Flattens a YouTube shard (mixed ``YouTubeRssSource`` + ``YouTubeVideoSource``) into a
 single ``[(canonical_url, VideoMetadata)]`` list, then runs the SHARED bulk core
-(``youtube_pipeline._batch_build_and_load``) ONCE: one ``fetch_many`` transcript fetch
-over ALL items (feeds + loose videos), build, load. The only per-kind difference is
-the resolve step — RSS metadata comes from the feed, single-video metadata from
-oEmbed; once flattened to ``(url, VideoMetadata)`` the two are indistinguishable.
+(``youtube_pipeline._batch_build_and_load``) once per ``app_config.data.batch_size``
+chunk: one ``fetch_many`` transcript fetch (one Bright Data collection) per chunk of
+feed + loose-video items, build, load. A collection failure or timeout therefore falls
+back only its own chunk to Gemini. The only per-kind difference is the resolve step —
+RSS metadata comes from the feed, single-video metadata from oEmbed; once flattened to
+``(url, VideoMetadata)`` the two are indistinguishable.
 
 Failure isolation is preserved at the flatten boundary: a feed that fails to fetch is
 logged + skipped (its items absent), an oEmbed-failing video is dropped, and the
@@ -18,10 +20,12 @@ there is no stable key to persist them under.
 from __future__ import annotations
 
 import logging
+from itertools import batched
 
 from beanie import PydanticObjectId
 from prefect import flow, task
 
+from tree.config.app_config import app_config
 from tree.config.sources import (
     YouTubeRssSource,
     YouTubeVideoSource,
@@ -82,13 +86,15 @@ async def ingest_youtube_batch(
     entries: list[YouTubeRssSource | YouTubeVideoSource],
     user_id: PydanticObjectId,
 ) -> list[Document]:
-    """Batch-ingest a YouTube shard (RSS feeds + single videos) via ONE bulk core.
+    """Batch-ingest a YouTube shard (RSS feeds + single videos) chunk by chunk.
 
     Flattens both source kinds into one ``[(canonical_url, VideoMetadata)]`` list —
     RSS feeds expand to per-video items (metadata from the feed, isolated per feed),
     single videos resolve via oEmbed (isolated per URL) — then runs the SHARED
-    ``_batch_build_and_load`` ONCE, so there is exactly ONE ``fetch_many`` transcript
-    fetch over feeds + loose videos combined.
+    ``_batch_build_and_load`` once per ``app_config.data.batch_size`` chunk, so each
+    chunk gets ONE ``fetch_many`` transcript fetch over its feed + loose videos.
+    ``invalid_inputs`` ride the first chunk only, so each ``invalid_url`` row is
+    written exactly once.
     """
 
     await init_mongodb(
@@ -127,9 +133,20 @@ async def ingest_youtube_batch(
         logger.info("YouTube: no resolvable items in shard")
         return []
 
-    ingested = await _batch_build_and_load(
-        items, user_id, invalid_inputs=invalid_inputs
-    )
+    # ``batched`` yields nothing for an empty list; an invalid-only shard still needs
+    # one core run (over zero items) to persist its ``invalid_url`` rows.
+    chunks = list(batched(items, app_config.data.batch_size)) or [()]
+    ingested: list[Document] = []
+    for index, chunk in enumerate(chunks):
+        ingested.extend(
+            await _batch_build_and_load(
+                list(chunk),
+                user_id,
+                invalid_inputs=invalid_inputs if index == 0 else None,
+            )
+        )
+        logger.info("YouTube chunk processed: %d ingested so far", len(ingested))
+
     logger.info(
         "YouTube: ingested %d items (%d feeds, %d single videos)",
         len(ingested),

@@ -792,7 +792,7 @@ class TestBuildBatch:
 
 
 class TestLoadBatch:
-    """DB Load over a single isolated gather via the shared ``load_video_document``."""
+    """DB Load isolated per element via the shared ``load_video_document``."""
 
     async def test_returns_persisted_subset_dropping_duplicates(self, mocker) -> None:
         doc_a = _make_doc(VIDEO_IDS[0])
