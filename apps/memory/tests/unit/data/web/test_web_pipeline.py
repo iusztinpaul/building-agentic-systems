@@ -27,7 +27,9 @@ import pytest
 import tree.data.web.web_pipeline as web_pipeline
 from beanie import PydanticObjectId
 
+from tree.config.app_config import DataConfig, app_config
 from tree.config.sources import WebSource
+from tree.data.batch import track_item_failures
 from tree.data.web.web_pipeline import (
     DEPLOYMENT_NAME,
     _ingest_web_url_one,
@@ -176,7 +178,7 @@ class TestExtractBatch:
         )
 
         assert result == [doc1, doc2]
-        # ONE awaited gather over the whole URL list: one scrape per URL.
+        # One scrape per handed-in URL.
         assert fetch_mock.await_count == 2
 
     async def test_isolates_one_scrape_failure(self, mocker) -> None:
@@ -283,7 +285,7 @@ class TestIngestWebUrlBatch:
         # No per-item sub-flow runs: the batch path never calls the thin wrapper.
         thin_spy.assert_not_awaited()
 
-    async def test_runs_extract_and_load_each_once_over_the_url_list(
+    async def test_runs_extract_and_load_once_when_the_list_fits_one_chunk(
         self, mocker
     ) -> None:
         urls = [f"https://example.com/{i}" for i in range(5)]
@@ -302,7 +304,7 @@ class TestIngestWebUrlBatch:
 
         await ingest_web_url_batch.fn(urls, PydanticObjectId())
 
-        # extract_batch + load_batch each run ONCE over the whole 5-URL list.
+        # 5 URLs fit in one default-size (500) chunk → one extract + one load.
         extract_spy.assert_awaited_once()
         load_spy.assert_awaited_once()
 
@@ -363,6 +365,89 @@ class TestIngestWebUrlBatch:
 
         mock_init.assert_awaited_once()
         assert result == []
+
+
+class TestIngestWebUrlBatchChunks:
+    """The flow streams the URL list in ``app_config.data.batch_size`` chunks."""
+
+    @pytest.fixture(autouse=True)
+    def _batch_size_two(self, mocker, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(app_config, "data", DataConfig(batch_size=2))
+        mocker.patch.object(web_pipeline, "init_mongodb", mocker.AsyncMock())
+
+    async def test_runs_extract_then_load_once_per_chunk(self, mocker) -> None:
+        urls = [f"https://example.com/{i}" for i in range(5)]
+        docs = {u: _make_doc(source_uri=u, title=str(i)) for i, u in enumerate(urls)}
+        extract_spy = mocker.patch.object(
+            web_pipeline,
+            "extract_batch",
+            mocker.AsyncMock(side_effect=lambda chunk, _uid: [docs[u] for u in chunk]),
+        )
+        load_spy = mocker.patch.object(
+            web_pipeline,
+            "load_batch",
+            mocker.AsyncMock(side_effect=lambda chunk_docs: list(chunk_docs)),
+        )
+
+        result = await ingest_web_url_batch.fn(urls, _USER_ID)
+
+        assert [call.args[0] for call in extract_spy.await_args_list] == [
+            urls[0:2],
+            urls[2:4],
+            urls[4:5],
+        ]
+        assert [len(call.args[0]) for call in load_spy.await_args_list] == [2, 2, 1]
+        assert result == [docs[u] for u in urls]
+
+    async def test_chunked_result_equals_the_single_chunk_result(
+        self, mocker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        urls = [f"https://example.com/{i}" for i in range(5)]
+        docs = {u: _make_doc(source_uri=u, title=str(i)) for i, u in enumerate(urls)}
+        mocker.patch.object(
+            web_pipeline,
+            "fetch_and_extract_web",
+            mocker.AsyncMock(side_effect=lambda url, _uid: docs[url]),
+        )
+        mocker.patch.object(
+            web_pipeline,
+            "load_web_document",
+            mocker.AsyncMock(side_effect=lambda doc: doc),
+        )
+
+        chunked = await ingest_web_url_batch.fn(urls, _USER_ID)
+        monkeypatch.setattr(app_config, "data", DataConfig(batch_size=500))
+        single = await ingest_web_url_batch.fn(urls, _USER_ID)
+
+        assert chunked == single
+
+    async def test_a_failure_in_one_chunk_does_not_stop_the_next(self, mocker) -> None:
+        # One scrape fails in chunk 1 ([0, 1]) and one in chunk 2 ([2, 3]).
+        urls = [f"https://example.com/{i}" for i in range(5)]
+        failing = {urls[0], urls[2]}
+
+        async def fake_scrape(url: str, _uid: PydanticObjectId) -> Document:
+            if url in failing:
+                raise RuntimeError(f"scrape failed: {url}")
+            return _make_doc(source_uri=url)
+
+        mocker.patch.object(
+            web_pipeline,
+            "fetch_and_extract_web",
+            mocker.AsyncMock(side_effect=fake_scrape),
+        )
+        load = mocker.patch.object(
+            web_pipeline,
+            "load_web_document",
+            mocker.AsyncMock(side_effect=lambda doc: doc),
+        )
+
+        with track_item_failures() as tally:
+            result = await ingest_web_url_batch.fn(urls, _USER_ID)
+
+        assert [doc.source_uri for doc in result] == [urls[1], urls[3], urls[4]]
+        assert load.await_count == 3
+        assert tally.count == 2
 
 
 class TestIngestWebBatchAdapter:

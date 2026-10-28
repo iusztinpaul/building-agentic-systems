@@ -192,6 +192,13 @@ concurrency:
   # 6 x 0.03 s at 2000 RPM, 6 x 20 s = 120 s at the free-tier 3 RPM.
   voyage_slot_acquire_timeout_seconds: 120
 
+# Data-pipeline batching, shared by every platform's ETL.
+data:
+  # Items per ETL batch: the unit of memory, retry and Prefect task run.
+  batch_size: 500
+  # Max in-flight requests inside one batch (gather_isolated's cap).
+  concurrency: 50
+
 prefect:
   # Nightly offline-pipeline schedule (UTC): ingests sources/listen.yaml for every
   # active user, then extracts, indexes and clusters it.

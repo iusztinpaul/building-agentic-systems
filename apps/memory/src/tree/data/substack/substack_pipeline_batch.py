@@ -1,17 +1,19 @@
 """Substack unified pipeline — ONE batch flow over single articles + RSS feeds.
 
 Flattens a Substack shard (mixed ``SubstackRssSource`` + ``SubstackArticleSource``)
-into a single ``[(Document, raw_entry)]`` list, then loads every item via ONE isolated
-gather over the SHARED ``substack.load_document``. The two kinds acquire content
-differently — RSS items carry feed-embedded content (NO scrape), single articles are
-scraped during flatten — but both normalize to ``(Document, raw_entry)``: the article
-path wraps its scraped HTML in a synthetic feed-entry (``{"content": [{"value": …}]}``)
-so reference extraction + dedup in ``load_document`` run identically. Once flattened the
-load can't tell which kind an item came from.
+into one work list — the resolved RSS ``(Document, raw_entry)`` items first, then the
+single-article URLs — and walks it in ``app_config.data.batch_size`` chunks: per chunk
+it scrapes ONLY the chunk's article URLs, then loads the chunk via the SHARED
+``substack.load_document``. The two kinds acquire content differently — RSS items carry
+feed-embedded content (NO scrape), single articles are scraped per chunk — but both
+normalize to ``(Document, raw_entry)``: the article path wraps its scraped HTML in a
+synthetic feed-entry (``{"content": [{"value": …}]}``) so reference extraction + dedup
+in ``load_document`` run identically. Once normalized the load can't tell which kind an
+item came from.
 
-Failure isolation is preserved at the flatten boundary: a feed that fails to fetch is
+Failure isolation is preserved at every boundary: a feed that fails to fetch is
 logged + skipped (its items absent), an article that fails to scrape is dropped, and
-the load gather isolates per-item failures. The thin single-article MCP flow
+the load isolates per-item failures. The thin single-article MCP flow
 (``substack_pipeline.ingest_substack_article``) and the pure helpers
 (``substack``) are unchanged.
 """
@@ -19,10 +21,12 @@ the load gather isolates per-item failures. The thin single-article MCP flow
 from __future__ import annotations
 
 import logging
+from itertools import batched
 
 from beanie import PydanticObjectId
 from prefect import flow, task
 
+from tree.config.app_config import app_config
 from tree.config.sources import (
     SubstackArticleSource,
     SubstackRssSource,
@@ -46,6 +50,10 @@ logger = logging.getLogger(__name__)
 # synthetic ``{"content": [{"value": body_html}]}`` for a scraped article).
 _NormalizedItem = tuple[Document, dict]
 
+# One entry of the chunked work list: an already-resolved RSS item, or an article URL
+# still to scrape.
+_WorkItem = _NormalizedItem | str
+
 
 @task(name="fetch-substack-rss-feed", retries=3, retry_delay_seconds=5)
 async def fetch_rss_feed(feed_url: str) -> list[dict]:
@@ -56,7 +64,7 @@ async def fetch_rss_feed(feed_url: str) -> list[dict]:
 async def extract_article_batch(
     article_urls: list[str], user_id: PydanticObjectId
 ) -> list[_NormalizedItem]:
-    """Scrape each article URL into a ``(Document, raw_entry)`` via ONE isolated gather.
+    """Scrape one chunk's article URLs into ``(Document, raw_entry)`` items.
 
     Extract+Transform are FUSED (one scrape yields the Document). A per-URL failure is
     logged + skipped by ``gather_isolated``, NOT propagated; the task hard-fails only on
@@ -77,9 +85,9 @@ async def extract_article_batch(
 
 @task(name="load-substack-batch", retries=3, retry_delay_seconds=5)
 async def load_batch(items: list[_NormalizedItem]) -> list[Document]:
-    """Dedup + persist the flattened ``(Document, raw_entry)`` list via ONE isolated gather.
+    """Dedup + persist one chunk of ``(Document, raw_entry)`` items, isolated per item.
 
-    Uniform over both kinds — once flattened the load can't tell an RSS item from a
+    Uniform over both kinds — once normalized the load can't tell an RSS item from a
     scraped article. Duplicates drop out as ``None``; a per-item failure is logged +
     skipped. Retried whole-batch on a batch-WIDE infra failure, safe via the
     ``(user_id, source_uri)`` dedup. Tier F (idempotent Mongo write) → 15 s budget.
@@ -119,18 +127,19 @@ async def ingest_substack_batch(
     entries: list[SubstackRssSource | SubstackArticleSource],
     user_id: PydanticObjectId,
 ) -> list[Document]:
-    """Batch-ingest a Substack shard (RSS feeds + single articles) via one load gather.
+    """Batch-ingest a Substack shard (RSS feeds + single articles) chunk by chunk.
 
-    Flattens both kinds into one ``[(Document, raw_entry)]`` list — RSS reads
-    feed-embedded content (no scrape, isolated per feed); single articles are scraped
-    during flatten (isolated per URL) and wrapped in a synthetic feed-entry. Then ONE
-    isolated gather over the SHARED ``load_document`` dedups + persists every item, so
-    the load path is identical for both kinds.
+    Resolves every feed up front from feed-embedded content (no scrape, isolated per
+    feed), then walks the work list — RSS items first, then article URLs — in
+    ``app_config.data.batch_size`` chunks. Per chunk, ONLY its article URLs are scraped
+    (isolated per URL, wrapped in a synthetic feed-entry) and the chunk's items are
+    loaded through the SHARED ``load_document``, so the load path is identical for both
+    kinds and RSS items are never re-scraped.
 
     Batch-grain ETL tasks (ADR-002 amendment #096): ``extract-substack-article-batch``
-    and ``load-substack-batch`` wrap the article gather and the load gather so both get
-    retries, matching web. They wrap the gathers — they do NOT re-introduce per-row
-    tasks, so this flow stays at a small constant task-run count whatever the shard size.
+    and ``load-substack-batch`` wrap the per-chunk scrape and load so both get retries,
+    matching web. They run once per chunk — never per row — so the task-run count grows
+    with ⌈items / batch_size⌉, not with the item count.
     """
 
     await init_mongodb(
@@ -141,7 +150,7 @@ async def ingest_substack_batch(
     feed_urls = [e.uri for e in entries if isinstance(e, SubstackRssSource)]
     article_urls = [e.uri for e in entries if isinstance(e, SubstackArticleSource)]
 
-    items: list[_NormalizedItem] = []
+    work: list[_WorkItem] = []
 
     # RSS feeds → expand from feed-embedded content (no scrape), isolated per feed.
     if feed_urls:
@@ -154,19 +163,28 @@ async def ingest_substack_batch(
             logger.warning(
                 "Feed resolve failed for %d/%d feeds", failures, len(feed_urls)
             )
-        items.extend(item for feed_items in per_feed for item in feed_items)
+        work.extend(item for feed_items in per_feed for item in feed_items)
 
-    # Single articles → scrape during flatten, isolated per URL.
-    if article_urls:
-        items.extend(await extract_article_batch(article_urls, user_id))
+    # Single articles → scraped per chunk below, isolated per URL.
+    work.extend(article_urls)
 
-    if not items:
+    if not work:
         logger.info("Substack: no resolvable items in shard")
         return []
 
-    # Uniform load over the flattened (Document, raw_entry) list — duplicates drop as
-    # None, per-item failures are isolated.
-    ingested = await load_batch(items)
+    ingested: list[Document] = []
+    for chunk in batched(work, app_config.data.batch_size):
+        # RSS items precede article URLs in ``work``, so the chunk's load order
+        # (RSS items, then scraped articles) matches the unchunked order.
+        items = [item for item in chunk if not isinstance(item, str)]
+        chunk_urls = [item for item in chunk if isinstance(item, str)]
+        if chunk_urls:
+            items.extend(await extract_article_batch(chunk_urls, user_id))
+        # Uniform load over the chunk — duplicates drop as None, per-item failures
+        # are isolated.
+        ingested.extend(await load_batch(items))
+        logger.info("Substack chunk processed: %d ingested so far", len(ingested))
+
     logger.info(
         "Substack: ingested %d items (%d feeds, %d single articles)",
         len(ingested),

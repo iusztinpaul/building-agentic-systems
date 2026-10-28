@@ -7,19 +7,20 @@ Build a personal assistant rooted in a knowledge-graph memory, powered by ontolo
 Tree has two halves, wired together by [MCP](https://modelcontextprotocol.io/):
 
 - **Memory** (`apps/memory/`) — a Python app that ingests documents from multiple sources (Substack, arXiv, files, conversations), turns them into memory (chunk rows in `rag` mode, plus an LLM-extracted knowledge graph in `graphrag`), indexes it for hybrid text + vector + graph search on MongoDB, and exposes the whole thing over a FastMCP server.
-- **Harness** (`apps/harness/`) — a minimal TypeScript coding-agent (`tree` CLI, Bun + Ink) that spawns the memory's MCP server automatically and lets you query, explore, and write to the graph in natural language.
+- **Harness** (`apps/harness/`) — `tree-agent`, a light [pi](https://github.com/earendil-works/pi) clone in TypeScript (Node + pnpm): one agent loop, four built-in tools (`read`, `bash`, `edit`, `write`), MCP tools with exposure levels, a codemode sandbox whose scripts can call `llm()`, two permission modes (`ask` / `auto`) and JSONL sessions. It reaches the memory's MCP server through `.tree-agent/mcp.json` and lets you query, explore, and write to memory in natural language.
 
-The goal: a personal assistant whose memory is a graph you own, queryable by any MCP-aware client (the bundled harness, Claude Code, Claude Desktop, Cursor, …).
+The goal: a personal assistant whose memory is a graph you own, queryable by any MCP-aware client (the harness in this repo, Claude Code, Claude Desktop, Cursor, …).
 
 ## Repo layout
 
 This is a monorepo. Each app owns its own build files; cross-app concerns stay at the root.
 
 - `apps/memory/` — Python app (uv + Prefect + FastMCP). See [`apps/memory/README.md`](apps/memory/README.md).
-- `apps/harness/` — TypeScript agent (Bun + Ink). See [`apps/harness/README.md`](apps/harness/README.md).
+- `apps/harness/` — TypeScript agent `tree-agent` (Node ≥ 22 + pnpm + vitest + Biome). See [`apps/harness/README.md`](apps/harness/README.md).
 - `docker/` — shared infra (MongoDB replica-set config, `mongot` search config).
 - `docker-compose.yml` — spins up MongoDB + mongot + Prefect server + a Prefect worker.
-- `.mcp.json` — declares the `tree-memory` MCP server so the harness (and any other MCP client) can spawn it.
+- `.mcp.json` — Claude Code's MCP config (hosted `tree-memory`, `tree-memory-local`, `mongodb-mcp-server`); `tree-agent` never reads it.
+- `.tree-agent/mcp.json` — `tree-agent`'s project MCP config: the hosted `tree-memory` server (OAuth login) and the stdio `tree-memory-local` server with their tool exposure (see [MCP](apps/harness/README.md#mcp)).
 - `.env` — shared secrets and infra settings (see `.env.example`).
 - `Makefile` — thin root that delegates per-app (`make memory-<t>` / `make harness-<t>`) and owns infra + aggregate targets.
 
@@ -29,16 +30,16 @@ This is a monorepo. Each app owns its own build files; cross-app concerns stay a
 
 - [Python 3.14+](https://www.python.org/)
 - [uv](https://docs.astral.sh/uv/) — Python package manager
-- [Bun](https://bun.sh/) ≥ 1.1 — runtime for the harness (`brew install bun` or `curl -fsSL https://bun.sh/install | bash`)
+- [Node.js](https://nodejs.org/) ≥ 22.19 with corepack — runtime for the harness; `corepack enable pnpm` once gives you the `pnpm` pinned in `apps/harness/package.json` (no global pnpm install). No corepack (Node 25+ dropped it)? See [Install](apps/harness/README.md#install).
 - [Docker](https://www.docker.com/) and Docker Compose
 - [GNU Make](https://www.gnu.org/software/make/)
 - [mongosh](https://www.mongodb.com/docs/mongodb-shell/install/) — shell for interacting with MongoDB (`brew install mongosh`)
-- A [Google AI API key](https://aistudio.google.com/apikey) (Gemini, used by both apps)
+- A [Google AI API key](https://aistudio.google.com/apikey) (Gemini, used by the memory app)
+- An [OpenRouter API key](https://openrouter.ai/settings/keys) — the harness's only model provider
 
 **Optional**
 
 - [MongoDB Compass](https://www.mongodb.com/products/tools/compass) — GUI for inspecting collections.
-- [`ripgrep`](https://github.com/BurntSushi/ripgrep) — enables the harness's `grep` tool.
 - [Voyage AI](https://www.voyageai.com/) key — only if you want Voyage embeddings.
 - [Modal](https://modal.com/) account + a [Proxy token](https://modal.com/docs/guide/webhook-proxy-auth) — only if you want to serve a model (an embedding model or an LLM) on Modal.
 
@@ -48,13 +49,13 @@ This is a monorepo. Each app owns its own build files; cross-app concerns stay a
 # Clone
 git clone <repo-url> && cd building-agentic-systems
 
-# Shared .env — fill in GOOGLE_API_KEY at minimum
+# Shared .env — fill in GOOGLE_API_KEY (memory) and OPENROUTER_API_KEY (harness) at minimum
 cp .env.example .env
 
 # Memory app (Python)
 make memory-build
 
-# Harness (TypeScript)
+# Harness (TypeScript) — needs `corepack enable pnpm` once
 make harness-install
 ```
 
@@ -182,24 +183,27 @@ make memory-run-pipeline MODE=online SOURCE="https://example.com/some-post"    #
 
 Pipeline parallelism (`extraction.num_shards` in `default.yaml`, per-source `num_workers`) is covered in [`apps/memory/README.md`](apps/memory/README.md#serving-workflows); source selection (`SOURCE_FILE=` / `URI=`) and the nightly cron in [Data pipelines](apps/memory/README.md#data-pipelines).
 
-**7. Drive memory with the agent.**
+**7. Drive memory with the agent.** `make harness-*` runs inside `apps/harness`, so pass `--cwd ../..`: the memory tools come from the repo root's `.tree-agent/mcp.json`, which loads only in a trusted cwd.
 
 ```bash
-# Interactive Ink REPL
-make harness-dev
+# Interactive TUI (pi-tui) on the repo root; answer y at the trust prompt once
+make harness-dev ARGS="--cwd ../.."
 
-# One-shot
-PROMPT="what do I have on AI agents in memory?" make harness-run
+# Headless one-shot: prints the final answer, exits 0 / 1 / 2 (blocked)
+make harness-run PROMPT="what do I have on AI agents in memory?" ARGS="--cwd ../.. --trust"
+
+# Same run, one AgentEvent per line (JSONL) on stdout
+make harness-run PROMPT="what do I have on AI agents in memory?" ARGS="--cwd ../.. --trust --json"
 ```
 
-The harness reads `.mcp.json` at the repo root and auto-spawns the `tree-memory` MCP server, so its memory tools (`mcp__tree-memory__*` — see the [tool catalogue](apps/memory/README.md#mcp-server)) are available from the first prompt.
+With `tree-agent` on your `PATH` (see [Install](apps/harness/README.md#install)), run it from the repo root instead: `tree-agent` opens the TUI, `tree-agent "<prompt>"` runs headless. The memory server's tools register as `mcp__tree_memory_local__*` (the server key is sanitised to a valid identifier; see the [tool catalogue](apps/memory/README.md#mcp-server)), split by exposure: `search_memory` is `direct` (the hot read path, always in the model's tool list), `visualize_*` is `deferred` (rarely used, found through `tool_search`), and the rest is `codemode` (bulk and many-small-call tools, reached from sandbox scripts) — see [Exposure](apps/harness/README.md#exposure).
 
 **On-demand web search** — the `search_web` tool searches the live web via Bright Data's SERP API without polluting memory (ingest is opt-in); see the [`search_web` example](apps/memory/README.md#search_web-example).
 
 ## App guides
 
 - **Memory app** → [`apps/memory/README.md`](apps/memory/README.md). Configuration (`apps/memory/src/tree/config/default.yaml` + the `sources/` files), every Prefect deployment, the full MCP tool catalogue, Modal embedding deployment, test layout.
-- **Harness app** → [`apps/harness/README.md`](apps/harness/README.md). Modes (CLI vs Ink), native tools, permissions, sub-agents, shell hooks, JSONL sessions.
+- **Harness app** → [`apps/harness/README.md`](apps/harness/README.md). Modes (TUI vs headless), the four built-in tools, MCP tool exposure and `tool_search`, permissions (`ask` / `auto`), skills, codemode with `llm()`, compaction, JSONL sessions.
 
 ## Monitoring
 

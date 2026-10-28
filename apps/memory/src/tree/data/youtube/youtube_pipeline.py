@@ -110,8 +110,8 @@ async def fetch_transcripts_batch(
     1. Credential gate, BEFORE any billable call: with neither key configured the
        task raises; with only one, it runs on that backend and never constructs
        the other (whose constructor would raise).
-    2. Primary: ONE ``BrightDataTranscriptFetcher().fetch_many(urls)`` over ALL
-       urls — one Bright Data collection per batch.
+    2. Primary: ONE ``BrightDataTranscriptFetcher().fetch_many(urls)`` over the
+       batch's urls — one Bright Data collection per batch (a batch flow chunk).
     3. Fallback: a SECOND bulk ``fetch_many`` over ONLY the transcript-less slots.
        A batch-WIDE Bright Data failure (missing credentials, trigger rejected,
        poll timeout) makes that subset the whole batch instead of failing the
@@ -327,7 +327,7 @@ async def build_batch(
 
 @task(name="load-youtube-batch", retries=3, retry_delay_seconds=5)
 async def load_batch(docs: list[Document]) -> list[Document]:
-    """Dedup + persist one batch via a SINGLE isolated gather.
+    """Dedup + persist one batch, isolated per element via ``gather_isolated``.
 
     Awaits the shared ``load_video_document`` per Document and returns the successful,
     non-``None`` subset (duplicates drop as ``None``); a per-element failure is logged
@@ -351,7 +351,8 @@ async def _batch_build_and_load(
 ) -> list[Document]:
     """Shared core: "(url, metadata) list → fallback chain → build → load".
 
-    The single tail both YouTube pipelines run, called ONCE per feed/batch:
+    The single tail both YouTube pipelines run — once per single-video ingest, once
+    per ``app_config.data.batch_size`` chunk of a batch shard:
 
     1. ``fetch_transcripts_batch`` — the Bright-Data-primary / Gemini-fallback
        chain (both fetchers constructed inside the task), returning the
@@ -414,7 +415,7 @@ async def _resolve_video_item(
 # the Bright Data transcript collection, ADR-002 #096 rule 3c) — this is the one
 # network hop before the billable core, so it gets its own durability slot
 # (amendment #097). The BATCH path calls the plain ``_resolve_video_item`` under
-# ``gather_isolated`` instead, keeping its task-run count constant per shard.
+# ``gather_isolated`` instead, so oEmbed resolution adds no task runs per video.
 @task(name="resolve-youtube-video", retries=3, retry_delay_seconds=5)
 async def resolve_video(video_url: str) -> tuple[str, VideoMetadata] | None:
     return await _resolve_video_item(video_url)
@@ -449,7 +450,7 @@ async def _ingest_youtube_video_one(
     Resolves the id → canonical URL → per-video oEmbed metadata, then runs the SHARED
     ``_batch_build_and_load`` over the one-item list (the transcript fallback chain +
     build + load). Shared by the thin MCP flow; the batch path calls the shared core
-    directly with the whole URL list instead. Returns the persisted Document, or
+    directly, once per chunk of its URL list, instead. Returns the persisted Document, or
     ``None`` for an unresolvable id / missing transcript / duplicate.
 
     An unresolvable input still runs the core — over ZERO items and the raw string as

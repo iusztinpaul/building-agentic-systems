@@ -1,3 +1,5 @@
+> **Status:** the harness (`apps/harness`, tree-agent) runs on Node + pnpm + vitest, not Bun, per [ADR-016 §1](../adrs/016_tree_agent_harness.md#decision) (book fidelity to pi).
+> This note stays as a general reference for picking TypeScript tooling.
 # The Modern TypeScript Stack: Bun + Biome + tsc
 
 A decision-oriented reference for picking TypeScript tooling on small to medium projects. Captures the trade-offs behind choosing **Bun**, **Biome**, and (sometimes) **Turborepo** over the legacy Node + npm + ESLint + Prettier + Jest + webpack sprawl.

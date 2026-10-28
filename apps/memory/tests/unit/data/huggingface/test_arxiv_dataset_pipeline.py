@@ -1,19 +1,22 @@
 """Unit tests for ``tree.data.huggingface.arxiv_dataset_pipeline`` (#078).
 
-The arXiv HF leaf pipeline is BATCH-grain: per streamed ``batch_size``-chunk the
-flow runs three ETL-phase steps — ``transform_batch`` (pure map, PLAIN function
-per ADR-002 #097), ``enrich_batch`` (network task, only when ``fetch_content``),
-and ``load_batch`` (DB Load task). Per-element failures are isolated INSIDE
-each task via ``asyncio.gather(return_exceptions=True)`` — a bad element is logged
-+ skipped and the task returns the successful subset; only a batch-WIDE infra
+The arXiv HF leaf pipeline is BATCH-grain: per streamed
+``app_config.data.batch_size`` chunk the flow runs three ETL-phase steps —
+``transform_batch`` (pure map, PLAIN function per ADR-002 #097), ``enrich_batch``
+(network task, only when ``fetch_content``), and ``load_batch`` (DB Load task).
+Per-element failures are isolated INSIDE each task via
+``asyncio.gather(return_exceptions=True)`` — a bad element is logged + skipped and
+the task returns the successful subset; only a batch-WIDE infra
 failure hard-fails the task (Prefect then retries the whole batch, safe because
 ``load_document`` dedups on ``(user_id, source_uri)``).
 """
 
 from unittest.mock import AsyncMock
 
+import pytest
 from beanie import PydanticObjectId
 
+from tree.config.app_config import DataConfig, app_config, load_app_config
 from tree.config.sources import HuggingFaceDatasetSource
 from tree.data.huggingface.arxiv_dataset_pipeline import (
     ARXIV_DATASET_ID,
@@ -356,17 +359,21 @@ class TestIngestArxivDataset:
 
         assert fetch_mock.call_args.kwargs["offset"] is None
 
-    async def test_takes_every_knob_from_the_dispatched_entry(self, mocker) -> None:
+    async def test_takes_source_knobs_from_the_dispatched_entry(
+        self, mocker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Regression: the flow must NOT re-read the source YAML for its config.
 
-        It used to look its ``batch_size``/``concurrency``/``max_samples`` up via
+        It used to look its ``max_samples`` (and batching) up via
         ``default_configured_sources()``, which reads ``sources/*.yaml`` at run
         time. In a Prefect Managed run that file is unreachable, so every arxiv
         worker died with ``FileNotFoundError`` — while holding a fully-populated
-        entry the coordinator had already resolved.
+        entry the coordinator had already resolved. ``max_samples`` + ``offset``
+        come off the entry; ``batch_size`` comes off ``app_config.data`` (task 225).
         """
 
-        # Arrange — entry values deliberately differ from the model defaults.
+        # Arrange — values deliberately differ from the defaults.
+        monkeypatch.setattr(app_config, "data", DataConfig(batch_size=7))
         fetch_mock = mocker.patch(
             "tree.data.huggingface.arxiv_dataset_pipeline._fetch_dataset_batches",
             return_value=iter([]),
@@ -376,10 +383,78 @@ class TestIngestArxivDataset:
             new_callable=AsyncMock,
         )
 
+        # Act
         await ingest_arxiv_dataset.fn(
-            entry=_entry(max_samples=250, batch_size=7, concurrency=3, offset=250),
+            entry=_entry(max_samples=250, offset=250), user_id=PydanticObjectId()
+        )
+
+        # Assert
+        assert fetch_mock.call_args.args == (250, 7)
+        assert fetch_mock.call_args.kwargs["offset"] == 250
+
+
+class TestIngestArxivDatasetUsesDataConfig:
+    """Task 225: chunk size and enrich concurrency come from ``app_config.data``."""
+
+    async def test_env_batch_size_chunks_seven_rows_into_3_3_1(
+        self, mocker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange — the operator escape hatch, loaded for real, over 7 streamed rows.
+        monkeypatch.setenv("TREE_DATA__BATCH_SIZE", "3")
+        monkeypatch.setattr(app_config, "data", load_app_config().data)
+        mocker.patch(
+            "tree.data.huggingface.arxiv_dataset.load_dataset",
+            return_value=iter([_raw(f"2103.{i:05d}") for i in range(7)]),
+        )
+        mocker.patch(
+            "tree.data.huggingface.arxiv_dataset_pipeline.init_mongodb",
+            new_callable=AsyncMock,
+        )
+        load_batch_spy = mocker.patch(
+            "tree.data.huggingface.arxiv_dataset_pipeline.load_batch",
+            new_callable=AsyncMock,
+            side_effect=lambda docs: docs,
+        )
+
+        # Act
+        result = await ingest_arxiv_dataset.fn(
+            entry=_entry(max_samples=7), user_id=PydanticObjectId()
+        )
+
+        # Assert
+        chunk_sizes = [len(call.args[0]) for call in load_batch_spy.await_args_list]
+        assert chunk_sizes == [3, 3, 1]
+        assert len(result) == 7
+
+    async def test_enrich_batch_runs_under_data_concurrency(
+        self, mocker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        monkeypatch.setattr(app_config, "data", DataConfig(concurrency=2))
+        mocker.patch(
+            "tree.data.huggingface.arxiv_dataset_pipeline._fetch_dataset_batches",
+            return_value=iter([[_raw(f"2103.{i:05d}") for i in range(4)]]),
+        )
+        mocker.patch(
+            "tree.data.huggingface.arxiv_dataset_pipeline.init_mongodb",
+            new_callable=AsyncMock,
+        )
+        mocker.patch(
+            "tree.data.huggingface.arxiv_dataset_pipeline.load_batch",
+            new_callable=AsyncMock,
+            side_effect=lambda docs: docs,
+        )
+        enrich_spy = mocker.patch(
+            "tree.data.huggingface.arxiv_dataset_pipeline.enrich_batch",
+            new_callable=AsyncMock,
+            side_effect=lambda docs, concurrency: docs,
+        )
+
+        # Act
+        await ingest_arxiv_dataset.fn(
+            entry=_entry(max_samples=4, fetch_content=True),
             user_id=PydanticObjectId(),
         )
 
-        # Assert — max_samples + batch_size come straight off the entry.
-        assert fetch_mock.call_args.args == (250, 7)
+        # Assert
+        assert enrich_spy.await_args.args[1] == 2

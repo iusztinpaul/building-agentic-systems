@@ -1,35 +1,152 @@
-// `AnyTool`, `GeminiFunctionDeclaration`, and `toGeminiTools` live in ./gemini —
-// a leaf module with no sibling-tool imports. Re-exported here for back-compat
-// so existing `from "./tools/registry"` consumers keep working. New code that
-// only needs the type or the adapter should import from "./tools/gemini"
-// directly to avoid pulling in the full tool list (and the import cycle that
-// comes with it: registry → task → agent/subagents → agent/loop → client).
+// Tools and their exposure (spec §8). The registry is the one place
+// that knows which tools the model may see and call: `direct` tools
+// always, `deferred` ones only after activate(), `codemode` ones only
+// from a codemode script, `hidden` ones never.
 
-import { bashTool } from "./bash";
-import { editTool } from "./edit";
-import { type AnyTool, type GeminiFunctionDeclaration, toGeminiTools } from "./gemini";
-import { globTool } from "./glob";
-import { grepTool } from "./grep";
-import { readTool } from "./read";
-import { taskTool } from "./task";
-import { todoTool } from "./todo";
-import { writeTool } from "./write";
+import type { z } from "zod";
+import { zodToJsonSchema } from "zod-to-json-schema";
+import type { JsonSchema, ToolSchema } from "../provider/types.ts";
+import type { ToolCall } from "../types.ts";
 
-export { type AnyTool, type GeminiFunctionDeclaration, toGeminiTools };
+export type Exposure = "direct" | "deferred" | "codemode" | "hidden";
 
-export const builtInTools: AnyTool[] = [
-  bashTool,
-  readTool,
-  writeTool,
-  editTool,
-  globTool,
-  grepTool,
-  todoTool,
-  taskTool,
-];
+export interface ToolContext {
+  cwd: string;
+  signal: AbortSignal;
+  origin: "model" | "codemode";
+  depth: number; // 0 = the main loop; llm() sub-loops count up
+}
 
-export function createRegistry(tools: AnyTool[] = builtInTools): Map<string, AnyTool> {
-  const reg = new Map<string, AnyTool>();
-  for (const t of tools) reg.set(t.name, t);
-  return reg;
+// The model only ever sees `content`; `structured` is the parsed
+// value a codemode script receives.
+export interface ToolResult {
+  content: string;
+  isError?: boolean;
+  structured?: unknown;
+}
+
+export interface ToolDefinition<S extends z.AnyZodObject = z.AnyZodObject> {
+  name: string; // ^[a-z][a-z0-9_]*$
+  description: string; // the provider tools array
+  promptSnippet: string; // one line in the `tools` prompt section
+  parameters: S;
+  // Sent to the provider instead of `parameters` as JSON Schema: an
+  // MCP tool's own inputSchema (its zod `parameters` only checks
+  // "an object"; the server validates the rest).
+  inputSchema?: JsonSchema;
+  exposure: Exposure;
+  isReadOnly: boolean; // permission gate step 1 (task 206)
+  // A method, so a ToolDefinition<{path}> fits a registry of any.
+  execute(params: z.infer<S>, ctx: ToolContext): Promise<ToolResult>;
+}
+
+export class ToolRegistry {
+  readonly #tools = new Map<string, ToolDefinition>();
+  readonly #activated = new Set<string>();
+
+  register(tool: ToolDefinition): void {
+    if (this.#tools.has(tool.name)) {
+      throw new Error(`tool "${tool.name}" is already registered`);
+    }
+    this.#tools.set(tool.name, tool);
+  }
+
+  get(name: string): ToolDefinition | undefined {
+    return this.#tools.get(name);
+  }
+
+  list(exposure?: Exposure): ToolDefinition[] {
+    const all = [...this.#tools.values()];
+    return exposure ? all.filter((t) => t.exposure === exposure) : all;
+  }
+
+  // deferred → declared for the rest of the session; other names
+  // are ignored (codemode and hidden tools never become declared).
+  activate(names: string[]): void {
+    for (const name of names) {
+      if (this.get(name)?.exposure === "deferred") {
+        this.#activated.add(name);
+      }
+    }
+  }
+
+  activated(): string[] {
+    return [...this.#activated];
+  }
+
+  // A new session (/clear) starts with nothing activated.
+  deactivateAll(): void {
+    this.#activated.clear();
+  }
+
+  // What the model sees: direct ∪ activated, in registration order.
+  declared(): ToolDefinition[] {
+    return this.list().filter(
+      (t) => t.exposure === "direct" || this.#activated.has(t.name),
+    );
+  }
+
+  // What a codemode script may call: codemode ∪ direct ∪ activated,
+  // in registration order (hidden tools are never registered).
+  scriptable(): ToolDefinition[] {
+    const declared = new Set(this.declared());
+    return this.list().filter(
+      (t) => t.exposure === "codemode" || declared.has(t),
+    );
+  }
+
+  schemasForRequest(): ToolSchema[] {
+    return this.declared().map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: parametersOf(tool),
+    }));
+  }
+
+  // Never throws: every failure is an isError result for the caller.
+  async execute(call: ToolCall, ctx: ToolContext): Promise<ToolResult> {
+    const tool = this.get(call.name);
+    if (!tool || !this.#callable(tool, ctx.origin)) {
+      return { content: `Unknown tool: ${call.name}`, isError: true };
+    }
+    const parsed = tool.parameters.safeParse(call.arguments);
+    if (!parsed.success) {
+      const issues = parsed.error.issues.map(
+        (i) => `  - ${i.path.join(".") || "(root)"}: ${i.message}`,
+      );
+      return {
+        content: [`Invalid arguments for ${tool.name}:`, ...issues].join(
+          "\n",
+        ),
+        isError: true,
+      };
+    }
+    try {
+      return await tool.execute(parsed.data, ctx);
+    } catch (err) {
+      return { content: (err as Error).message, isError: true };
+    }
+  }
+
+  // The model: direct ∪ activated; a script also codemode (the same
+  // set as scriptable()). Never an unactivated deferred or hidden tool.
+  #callable(tool: ToolDefinition, origin: ToolContext["origin"]) {
+    if (origin === "codemode" && tool.exposure === "codemode") return true;
+    return tool.exposure === "direct" || this.#activated.has(tool.name);
+  }
+}
+
+// A tool's parameters as JSON Schema: an MCP tool's own, else zod's.
+export function parametersOf(tool: ToolDefinition): JsonSchema {
+  return tool.inputSchema ?? toJsonSchema(tool.parameters);
+}
+
+// The default JSON Schema target keeps `.optional()` params optional
+// (the openAi target used by complete<T> would make them required).
+function toJsonSchema(schema: z.AnyZodObject): JsonSchema {
+  const json = zodToJsonSchema(schema, {
+    $refStrategy: "none",
+  }) as JsonSchema;
+  delete json.$schema;
+  return json;
 }

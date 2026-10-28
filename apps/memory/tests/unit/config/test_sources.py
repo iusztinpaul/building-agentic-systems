@@ -10,6 +10,7 @@ two-strategy path resolution), the cached ``default_configured_sources``,
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from tree.config import sources as sources_module
 from tree.config.sources import (
@@ -144,6 +145,23 @@ class TestLoadSources:
         entries = load_sources([BACKFILL_PATH])
 
         assert any(isinstance(entry, WebSource) for entry in entries)
+
+    def test_stale_huggingface_batching_key_fails_naming_the_key(self, tmp_path):
+        """Task 225: a source file still carrying the removed per-source
+        ``batch_size`` (now ``app_config.data``) fails loudly, not silently."""
+
+        # Arrange
+        stale = tmp_path / "stale.yaml"
+        stale.write_text(
+            "- uri: librarian-bots/arxiv-metadata-snapshot\n"
+            "  type: huggingface_dataset\n"
+            "  max_samples: 10\n"
+            "  batch_size: 50\n"
+        )
+
+        # Act / Assert
+        with pytest.raises(ValidationError, match="batch_size"):
+            load_sources([stale])
 
 
 class TestLoadSourcesPathResolution:

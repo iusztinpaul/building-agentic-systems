@@ -1,8 +1,10 @@
 """Generic web leaf pipeline — batch-grain ETL tasks + thin MCP flow (#081).
 
 The web path SCRAPES each URL via Bright Data Web Unlocker, so Extract+Transform FUSE —
-one scrape yields the Document. The batch flow runs two ETL-phase tasks over the WHOLE
-handed-in URL list:
+one scrape yields the Document. The batch flow walks the handed-in URL list in
+``app_config.data.batch_size`` chunks and runs two ETL-phase tasks per chunk (extract →
+load), so a shard's scraped content never sits in RAM all at once and a task retry
+replays — and re-bills — one chunk, not the whole shard:
 
 * ``extract_batch`` (network Extract+Transform fused, ``retries=2``) —
   ``list[str] -> list[Document]`` via the pure ``web.fetch_and_extract_web`` under
@@ -21,11 +23,13 @@ persist results — no flag is added.
 
 import logging
 import os
+from itertools import batched
 
 from beanie import PydanticObjectId
 from prefect import flow, task
 from prefect.client.orchestration import get_client
 
+from tree.config.app_config import app_config
 from tree.config.sources import WebSource
 from tree.config.settings import settings
 from tree.data.batch import gather_isolated
@@ -77,10 +81,11 @@ async def ingest_web_url(url: str, user_id: PydanticObjectId) -> Document | None
 
 
 # Tier B — billable: scrapes via Bright Data Web Unlocker, so ONE batch replay
-# re-bills ALL N urls. Capped at 2 (ADR-002 amendment #096); do NOT raise to 3.
+# re-bills every url in the chunk. Capped at 2 (ADR-002 amendment #096); do NOT
+# raise to 3.
 @task(name="extract-web-batch", retries=2, retry_delay_seconds=5)
 async def extract_batch(urls: list[str], user_id: PydanticObjectId) -> list[Document]:
-    """Scrape each URL into a Document via a SINGLE isolated gather.
+    """Scrape each URL of one chunk into a Document, isolated per URL.
 
     Extract+Transform are FUSED (one scrape yields the Document). Runs the pure
     ``web.fetch_and_extract_web`` per URL; a per-URL scrape failure is logged + skipped,
@@ -100,7 +105,7 @@ async def extract_batch(urls: list[str], user_id: PydanticObjectId) -> list[Docu
 
 @task(name="load-web-batch", retries=3, retry_delay_seconds=5)
 async def load_batch(docs: list[Document]) -> list[Document]:
-    """Dedup + persist each scraped Document via a SINGLE isolated gather.
+    """Dedup + persist each scraped Document of one chunk, isolated per element.
 
     Awaits the pure ``web.load_web_document`` per element. Returns the successful,
     non-``None`` subset (duplicates drop as ``None``); a per-element failure is logged +
@@ -121,10 +126,10 @@ async def ingest_web_url_batch(
 ) -> list[Document]:
     """Batch-ingest URLs via the batch tasks (NOT the per-item sub-flow).
 
-    Initialises MongoDB once, then runs ``extract_batch`` (scrape each URL) followed by
-    ``load_batch`` (persist each) — each ONCE over the whole URL list. The thin
-    ``ingest_web_url`` flow is NEVER invoked here, so the batch produces no per-item
-    sub-flow runs.
+    Initialises MongoDB once, then walks ``urls`` in ``app_config.data.batch_size``
+    chunks, running ``extract_batch`` (scrape each URL) followed by ``load_batch``
+    (persist each) per chunk — two task runs per chunk. The thin ``ingest_web_url`` flow
+    is NEVER invoked here, so the batch produces no per-item sub-flow runs.
     """
 
     await init_mongodb(
@@ -132,8 +137,11 @@ async def ingest_web_url_batch(
         settings.mongo.mongo_initdb_database,
     )
 
-    extracted = await extract_batch(urls, user_id)
-    ingested = await load_batch(extracted)
+    ingested: list[Document] = []
+    for chunk in batched(urls, app_config.data.batch_size):
+        extracted = await extract_batch(list(chunk), user_id)
+        ingested.extend(await load_batch(extracted))
+        logger.info("Web chunk processed: %d ingested so far", len(ingested))
 
     logger.info("Ingested %d web URLs out of %d", len(ingested), len(urls))
 

@@ -139,4 +139,6 @@ flowchart TD
 - **−** Breaking change to the YAML surface (no `sources:` in `default.yaml`, no `scheduled`
   flag) with no compat shim — acceptable for a single-operator project.
 - HuggingFace stays YAML-only by design: the `--uri` mode rejects it because dataset ingest
-  needs `max_samples`/`batch_size`/`num_workers`/`concurrency` that a bare URL can't carry.
+  needs `max_samples`/`fetch_content`/`num_workers` that a bare URL can't carry. Chunk size
+  and in-flight cap are NOT source fields: every platform reads `data.batch_size` /
+  `data.concurrency` from `default.yaml` (ADR-002, data-batching amendment).
