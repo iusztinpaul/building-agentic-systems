@@ -7,13 +7,16 @@ per-element failures" shape #078 INLINED inside its arxiv ``enrich_batch`` /
 plus arxiv ``load_batch``), crossing the threshold #078 named for pulling it into a
 shared module — so it lives here now.
 
-Contract: every element runs under a SINGLE ``asyncio.gather(return_exceptions=True)``.
-A per-element exception is logged at WARNING and the element is DROPPED; a ``None``
-result (e.g. a dedup skip) is dropped too but is NOT counted as a failure. The helper
-returns ``(successes, failure_count)`` and NEVER propagates one element's failure. Only
-a batch-WIDE failure (raised by the caller OUTSIDE the gather) hard-fails the calling
-task, which Prefect then retries — safe because the data-layer loads dedup on
-``(user_id, source_uri)`` so a retried batch never double-inserts.
+Contract: the whole list goes through ONE ``asyncio.gather(return_exceptions=True)``,
+but at most ``concurrency`` elements (default ``app_config.data.concurrency``) run their
+``work`` at once, held by an ``asyncio.Semaphore`` — a 100,000-item shard has at most
+50 requests in flight, not 100,000. A per-element exception is logged at WARNING and the
+element is DROPPED; a ``None`` result (e.g. a dedup skip) is dropped too but is NOT
+counted as a failure. The helper returns ``(successes, failure_count)`` and NEVER
+propagates one element's failure. Only a batch-WIDE failure (raised by the caller
+OUTSIDE the gather) hard-fails the calling task, which Prefect then retries — safe
+because the data-layer loads dedup on ``(user_id, source_uri)`` so a retried batch
+never double-inserts.
 
 Isolated is not forgotten (#174): every dropped element is ALSO added to the active
 :class:`ItemFailureTally`, opened by the data worker via :func:`track_item_failures`.
@@ -33,6 +36,7 @@ from contextvars import ContextVar
 
 from pydantic import BaseModel
 
+from tree.config.app_config import app_config
 from tree.flow_runs import PartialIngestError
 
 logger = logging.getLogger(__name__)
@@ -108,19 +112,34 @@ def _describe_failure(item: object, error: BaseException) -> str:
 async def gather_isolated[T, R](
     items: list[T],
     work: Callable[[T], Awaitable[R | None]],
+    *,
+    concurrency: int | None = None,
 ) -> tuple[list[R], int]:
     """Run ``work`` over each item, isolating per-element failures.
 
     Awaits ``work(item)`` for every item under one
-    ``asyncio.gather(return_exceptions=True)``. Returns the successful, non-``None``
-    results (input order) and the count of elements whose ``work`` raised. A raise is
-    logged at WARNING + dropped (never propagated) and added to the active
-    :class:`ItemFailureTally`, if any; a ``None`` result is dropped without being
-    counted as a failure.
+    ``asyncio.gather(return_exceptions=True)``, with at most ``concurrency`` calls in
+    flight (``None`` reads ``app_config.data.concurrency`` at call time). Returns the
+    successful, non-``None`` results (input order) and the count of elements whose
+    ``work`` raised. A raise is logged at WARNING + dropped (never propagated) and
+    added to the active :class:`ItemFailureTally`, if any; a ``None`` result is
+    dropped without being counted as a failure.
+
+    Raises:
+        ValueError: ``concurrency`` is below 1.
     """
 
+    cap = app_config.data.concurrency if concurrency is None else concurrency
+    if cap < 1:
+        raise ValueError(f"gather_isolated: concurrency must be >= 1, got {cap}")
+    semaphore = asyncio.Semaphore(cap)
+
+    async def _bounded(item: T) -> R | None:
+        async with semaphore:
+            return await work(item)
+
     results = await asyncio.gather(
-        *[work(item) for item in items], return_exceptions=True
+        *[_bounded(item) for item in items], return_exceptions=True
     )
 
     successes: list[R] = []

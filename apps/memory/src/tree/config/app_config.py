@@ -273,6 +273,20 @@ class ConcurrencyConfig(BaseModel):
     voyage_slot_acquire_timeout_seconds: float = 120.0
 
 
+class DataConfig(BaseModel):
+    """How much work one data-pipeline batch holds and runs at once (ADR-002).
+
+    * ``batch_size`` — items per ETL batch: the unit of memory, retry and
+      Prefect task run.
+    * ``concurrency`` — max in-flight ``work`` calls inside one batch, the cap
+      :func:`tree.data.batch.gather_isolated` applies. Good: 50 requests in
+      flight for a 100,000-article shard; bad: 100,000.
+    """
+
+    batch_size: int = Field(default=500, ge=1)
+    concurrency: int = Field(default=50, ge=1)
+
+
 class PrefectConfig(BaseModel):
     """Prefect deployment-topology knobs.
 
@@ -1106,6 +1120,7 @@ class AppConfig(BaseModel):
     mcp: MCPConfig = MCPConfig()
     dream: DreamConfig = DreamConfig()
     concurrency: ConcurrencyConfig = ConcurrencyConfig()
+    data: DataConfig = DataConfig()
     prefect: PrefectConfig = PrefectConfig()
     observability: ObservabilityConfig = ObservabilityConfig()
     youtube: YouTubeConfig = YouTubeConfig()

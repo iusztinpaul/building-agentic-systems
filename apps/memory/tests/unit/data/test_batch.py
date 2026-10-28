@@ -10,10 +10,13 @@ that it recurs 4+ times (substack RSS load + article extract + article load + ar
 load).
 """
 
+import asyncio
 import logging
 
+import pytest
 from prefect import flow, task
 
+from tree.config.app_config import DataConfig, app_config
 from tree.data.batch import (
     ItemFailureTally,
     gather_isolated,
@@ -119,6 +122,60 @@ class TestGatherIsolated:
 
         # Order tracks the input list, not completion order.
         assert results == [3, 1, 2]
+
+
+class _InFlightProbe:
+    """A ``work`` that records the peak number of concurrent calls."""
+
+    def __init__(self) -> None:
+        self.in_flight = 0
+        self.peak = 0
+
+    async def __call__(self, x: int) -> int:
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        # Two yields: every task that holds a slot starts before any finishes.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        self.in_flight -= 1
+        return x
+
+
+class TestGatherIsolatedConcurrencyCap:
+    """Task 223: a 100k shard must not open 100k requests at once."""
+
+    async def test_the_peak_in_flight_count_equals_the_cap(self) -> None:
+        probe = _InFlightProbe()
+
+        results, failures = await gather_isolated(
+            list(range(200)), probe, concurrency=50
+        )
+
+        # Reaches the cap (not serialized) and never exceeds it.
+        assert probe.peak == 50
+        assert results == list(range(200))
+        assert failures == 0
+
+    async def test_the_default_cap_is_read_from_config_at_call_time(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(app_config, "data", DataConfig(concurrency=3))
+        probe = _InFlightProbe()
+
+        await gather_isolated(list(range(20)), probe)
+
+        assert probe.peak == app_config.data.concurrency
+
+    @pytest.mark.parametrize("concurrency", [0, -1])
+    async def test_a_cap_below_one_raises_before_any_work(
+        self, concurrency: int
+    ) -> None:
+        probe = _InFlightProbe()
+
+        with pytest.raises(ValueError, match="concurrency must be >= 1"):
+            await gather_isolated([1, 2], probe, concurrency=concurrency)
+
+        assert probe.peak == 0
 
 
 class TestItemFailureTally:

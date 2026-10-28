@@ -13,6 +13,7 @@ from tree.config.app_config import (
     ChunkLevelConfig,
     ClusteringConfig,
     ConcurrencyConfig,
+    DataConfig,
     DreamConfig,
     EmbeddingBatchConfig,
     EmbeddingConfig,
@@ -629,6 +630,36 @@ class TestEmbeddingBatchCapsMustBePositive:
         monkeypatch.setenv("TREE_MODELS__EMBEDDING_BATCH__MAX_INPUTS", "0")
 
         with pytest.raises(ValidationError, match="max_inputs"):
+            load_app_config(custom)
+
+
+class TestDataConfig:
+    """Task 223: every data pipeline runs batches of 500 with 50 requests in flight."""
+
+    def test_default_yaml_and_typed_default_agree(self) -> None:
+        shipped = load_app_config(_DEFAULT_CONFIG_PATH).data
+
+        assert shipped == DataConfig()
+        assert shipped.batch_size == 500
+        assert shipped.concurrency == 50
+
+    def test_concurrency_env_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        custom = tmp_path / "data.yaml"
+        custom.write_text("data:\n  concurrency: 50\n")
+        monkeypatch.setenv("TREE_DATA__CONCURRENCY", "7")
+
+        config = load_app_config(custom)
+
+        assert config.data.concurrency == 7
+
+    @pytest.mark.parametrize("field", ["batch_size", "concurrency"])
+    def test_a_zero_value_fails_the_load(self, tmp_path: Path, field: str) -> None:
+        custom = tmp_path / "data.yaml"
+        custom.write_text(f"data:\n  {field}: 0\n")
+
+        with pytest.raises(ValidationError, match=field):
             load_app_config(custom)
 
 
