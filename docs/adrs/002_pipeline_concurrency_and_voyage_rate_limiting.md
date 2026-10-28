@@ -422,8 +422,8 @@ shared Voyage budget.
    `tracker/feature-batch-etl-task-topology-plan.md`.
 
    - **Task granularity = Batch, not Document.** Each leaf flow runs ETL-phase `@task`s
-     over a **Batch** (HuggingFace `batch_size`-chunk / one feed's entries / the whole
-     handed-in URL list), never per row. The per-row `extract_document` /
+     over a **Batch** — since the data-batching amendment below, one `data.batch_size`
+     chunk on every platform — never per row. The per-row `extract_document` /
      `fetch_paper_content` / `load_document` `@task` calls (and the per-doc
      `_process_document`) are GONE. Concrete payoff: a 1000-doc arXiv **Window** worker
      drops from ~1000 task runs (`extract-arxiv-document` + `load-arxiv-document` per row,
@@ -481,7 +481,7 @@ shared Voyage budget.
        its own scrape `extract_batch`); RSS is NOT unified onto the article scrape path.
      - **youtube-RSS + youtube-video** share the bulk-transcript-fetch + `build_batch` +
        `load_batch` tail (the `_batch_build_and_load` core in `youtube_pipeline.py`): ONE bulk
-       `fetcher.fetch_many(all_urls)` per feed/batch (the #080 fix — previously per-video
+       `fetcher.fetch_many(video_urls)` per Batch (the #080 fix — previously per-video
        `fetch_many([url])` inside per-URL sub-flows). The metadata SOURCE stays distinct:
        oEmbed per video (direct) vs `feed_entry_to_metadata` (RSS).
 
@@ -572,8 +572,8 @@ shared Voyage budget.
      existing `gather_isolated` calls in `extract-substack-article-batch` (`retries=3`) and
      `load-substack-batch` (`retries=3`), restoring the "Load is ALWAYS its own task" rule
      above and parity with web. The FLATTEN logic is unchanged — the tasks wrap the gathers,
-     they do not re-introduce per-row tasks, and the flow stays at a small constant number
-     of task runs regardless of shard size.
+     they do not re-introduce per-row tasks; the task-run count is ≈ phases × ⌈N /
+     `data.batch_size`⌉ (data-batching amendment below).
 
    - **Accepted exception (documented in code).** `arxiv`'s Extract
      (`_fetch_dataset_batches`) is a streamed generator the flow iterates, so it CANNOT be a
@@ -616,8 +616,8 @@ shared Voyage budget.
      - **Promoted:** `resolve-youtube-video` (Tier F, 3 / 5 s) wraps the single-video
        oEmbed resolve — the one network hop before the billable core, inside a flow
        that must not retry (rule 3c). The BATCH path keeps calling the plain
-       `_resolve_video_item` under `gather_isolated`, so its task-run count stays a
-       small constant per shard.
+       `_resolve_video_item` under `gather_isolated`, so resolving adds no task runs
+       (a task per video would add N).
 
    - **Task naming.** Task functions never carry a `_task` suffix — the decorator
      already says it, and the suffix leaks Prefect plumbing into every call site.
@@ -638,6 +638,45 @@ shared Voyage budget.
    a `make memory-serve-workflows` restart (local) or a push (Managed); a
    `TREE_EXTRACTION__NUM_SHARDS=8 make …` on the dispatching shell is ignored (dispatch
    forwards no environment) and the scripts warn about it.
+
+   **Amendment (data-batching, tasks 223–226 — one Batch size on every platform).**
+   #078–#082 left the Batch platform-specific (a HuggingFace chunk, one feed's entries, or
+   every URL the worker was handed), so a 100,000-URL Web shard ran ONE
+   `extract-web-batch` whose retry re-billed 100,000 Unlocker requests, and one YouTube
+   collection spanned the shard. Task names, retry tiers (#096) and task-worthiness (#097)
+   are unchanged — so Status stays `Accepted`.
+
+   - **Batch = one `data.batch_size` chunk (default 500), everywhere.** Web, Substack and
+     YouTube walk their flattened items in `itertools.batched(items, data.batch_size)`;
+     HuggingFace arXiv instead streams `data.batch_size` chunks from
+     `fetch_dataset_batches`. Each chunk runs extract → load: Web (`extract-web-batch` →
+     `load-web-batch`), Substack (`extract-substack-article-batch` only when the chunk holds
+     article URLs, then `load-substack-batch`), YouTube (`_batch_build_and_load(chunk)`),
+     HuggingFace arXiv (each streamed chunk). Both knobs live in the `data:` block of
+     `default.yaml`; `HuggingFaceDatasetSource` no longer carries `batch_size` /
+     `concurrency` (task 225).
+   - **In-flight cap = `data.concurrency` (default 50).** `gather_isolated` holds an
+     `asyncio.Semaphore(data.concurrency)`: a 500-item chunk keeps ≤50 requests open, not
+     500. Good: "≤50 Unlocker requests in flight per worker". Bad: "bounded concurrency".
+   - **Task runs ≈ phases × ⌈N / 500⌉ per shard — they grow with N.** Good: "100,000
+     Substack items → 200 chunks → ~400 task runs". Bad: "scales well". What it buys: a
+     task retry replays (and for Web / YouTube re-bills) one chunk, and one chunk of
+     scraped content is in RAM at a time.
+   - **YouTube: one Bright Data collection per chunk.** A collection that outlives
+     `youtube.brightdata_timeout_seconds: 600` falls back only its chunk to Gemini — up to
+     500 videos of video tokens. Measured in the task-226 e2e (2026-10-28, two runs): a
+     3-URL collection took 138 s / 76 s and a 1-URL one 139 s / 76 s, so the wait is
+     mostly fixed queue time (the YAML's single-video figure is ~173 s). A 500-video
+     collection is NOT timed yet (task 224's `[HUMAN]` check), so 600 s is unverified at
+     full chunk size. `invalid_url` rows are written with the first chunk only.
+   - **Known gap — Substack RSS is not streamed.** Feed content arrives whole, so every
+     resolved RSS `Document` sits in RAM before chunking; only article scrapes and loads
+     are chunked. Good: "20 feeds × 20 entries = 400 Documents held up front".
+   - **Deploy caveat — `HuggingFaceDatasetSource` is `extra="forbid"`.** A worker run the
+     OLD coordinator created still carries `batch_size` / `concurrency` in its `sources`
+     parameter and fails `extra_forbidden` on the new code. Do not deploy while a nightly
+     (`prefect.offline_cron`, 03:00 UTC) or backfill run is mid-flight; deploy after it
+     finishes, or re-run it once the deploy lands.
 
 4. **Admission control is `serve(global_limit=concurrency.runner_global_limit)`**
    kept close to `voyage_rpm` so we don't admit far more runs than the embed
