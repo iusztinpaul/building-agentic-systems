@@ -18,7 +18,7 @@ from typing import Annotated, Any, Literal, Union
 from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # --- Source variants (discriminated union) ---
 
@@ -44,10 +44,16 @@ class HuggingFaceDatasetSource(BaseModel):
     dispatch to a per-dataset ETL pipeline registered in
     ``tree.data.offline_pipeline``. Unknown dataset ids raise at dispatch time.
 
+    Batching (chunk size, in-flight fetches) is NOT a per-source knob: it comes
+    from ``app_config.data`` like every other platform (task 225).
+    ``extra="forbid"`` makes a stale YAML that still sets ``batch_size`` /
+    ``concurrency`` (or any misspelled key) fail validation naming the key,
+    instead of being silently ignored.
+
     Two of these fields draw an authored-vs-runtime split (#070, the config
     foundation for HF offset-window fan-out):
 
-    * ``num_workers`` — operator-AUTHORED YAML (like ``batch_size``). The
+    * ``num_workers`` — operator-AUTHORED YAML (like ``max_samples``). The
       offset-window fan-out width: #072 dispatches ``num_workers``
       ``data-etl-worker`` runs, each ingesting one disjoint offset-window of the
       dataset. Default ``1`` ⇒ a single window covering the whole
@@ -64,12 +70,12 @@ class HuggingFaceDatasetSource(BaseModel):
     ``offset`` round-trips as the int and ``offset=None`` round-trips as ``None``.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     type: Literal["huggingface_dataset"] = "huggingface_dataset"
     uri: str = Field(min_length=1)
     max_samples: int = 10
     fetch_content: bool = False
-    batch_size: int = 50
-    concurrency: int = 10
     # YAML-authored offset-window fan-out width (#070). See class docstring.
     num_workers: int = Field(default=1, ge=1)
     # Dispatch-time runtime coordinate (#070), never authored in YAML. See
@@ -374,8 +380,8 @@ def build_uri_sources(specs: list[tuple[str, str | None]]) -> list[SourceEntry]:
 
     Raises ``ValueError`` if any resulting entry is a
     :class:`HuggingFaceDatasetSource`: HF ingest needs tuning fields
-    (``max_samples`` / ``batch_size`` / ``num_workers`` / ``concurrency``) that a
-    bare URL can't carry, so define it in a YAML file (e.g.
+    (``max_samples`` / ``fetch_content`` / ``num_workers``) that a bare URL can't
+    carry, so define it in a YAML file (e.g.
     ``sources/backfill.yaml``) and use ``--source-file``. Inference never yields
     HF, so this fires only on an explicit ``…=huggingface_dataset`` token. There
     is NO parallel-list / count-matching constraint — per-URI optional typing is
@@ -396,8 +402,8 @@ def build_uri_sources(specs: list[tuple[str, str | None]]) -> list[SourceEntry]:
     if hf_uris:
         raise ValueError(
             "huggingface_dataset sources cannot be built from a --uri token: "
-            "HF ingest needs tuning fields (max_samples/batch_size/num_workers/"
-            "concurrency). Define it in a YAML file (e.g. sources/backfill.yaml) "
+            "HF ingest needs tuning fields (max_samples/fetch_content/"
+            "num_workers). Define it in a YAML file (e.g. sources/backfill.yaml) "
             f"and use --source-file. Offending uri(s): {', '.join(hf_uris)}."
         )
 

@@ -112,8 +112,6 @@ def test_windows_preserve_non_window_fields() -> None:
         max_samples=100,
         num_workers=2,
         fetch_content=True,
-        batch_size=25,
-        concurrency=5,
     )
 
     result = arxiv_window_entries(entry)
@@ -123,6 +121,4 @@ def test_windows_preserve_non_window_fields() -> None:
         assert w.uri == ARXIV_DATASET_ID
         assert w.type == "huggingface_dataset"
         assert w.fetch_content is True
-        assert w.batch_size == 25
-        assert w.concurrency == 5
         assert w.num_workers == 2

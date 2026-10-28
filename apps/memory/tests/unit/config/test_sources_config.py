@@ -118,8 +118,6 @@ class TestVariantValidation:
         assert entry.uri == "librarian-bots/arxiv-metadata-snapshot"
         assert entry.max_samples == 100
         assert entry.fetch_content is True
-        assert entry.batch_size == 50
-        assert entry.concurrency == 10
 
 
 class TestVariantDefaults:
@@ -139,8 +137,8 @@ class TestVariantDefaults:
         assert isinstance(entry, HuggingFaceDatasetSource)
         assert entry.max_samples == 10
         assert entry.fetch_content is False
-        assert entry.batch_size == 50
-        assert entry.concurrency == 10
+        assert entry.num_workers == 1
+        assert entry.offset is None
 
     def test_huggingface_dataset_uri_is_dataset_id(self):
         # Dataset id is NOT a URL; should still validate as long as it's non-empty.
@@ -187,6 +185,40 @@ class TestValidationErrors:
             SourcesConfig.model_validate({"sources": [{"type": source_type}]})
 
         assert "uri" in str(exc_info.value)
+
+    @pytest.mark.parametrize("stale_key", ["batch_size", "concurrency"])
+    def test_huggingface_dataset_rejects_removed_batching_key(self, stale_key: str):
+        """Task 225: HF batching moved to ``app_config.data``; a stale source YAML
+        that still sets the old per-source key fails loudly instead of being
+        silently ignored."""
+
+        with pytest.raises(ValidationError, match=stale_key) as exc_info:
+            SourcesConfig.model_validate(
+                [
+                    {
+                        "type": "huggingface_dataset",
+                        "uri": "librarian-bots/arxiv-metadata-snapshot",
+                        stale_key: 50,
+                    },
+                ]
+            )
+
+        assert exc_info.value.errors()[0]["type"] == "extra_forbidden"
+
+    def test_huggingface_dataset_rejects_misspelled_key(self):
+        """``extra="forbid"`` also stops a typo from silently falling back to the
+        default (``max_sample: 10000`` would otherwise ingest 10 rows)."""
+
+        with pytest.raises(ValidationError, match="max_sample"):
+            SourcesConfig.model_validate(
+                [
+                    {
+                        "type": "huggingface_dataset",
+                        "uri": "librarian-bots/arxiv-metadata-snapshot",
+                        "max_sample": 10000,
+                    },
+                ]
+            )
 
 
 class TestUntypedEntryNormalization:
@@ -315,7 +347,7 @@ class TestYamlRoundTrip:
         assert isinstance(sources[1], SubstackArticleSource)
         assert isinstance(sources[2], HuggingFaceDatasetSource)
         assert sources[2].max_samples == 25
-        assert sources[2].batch_size == 50  # default preserved
+        assert sources[2].fetch_content is False  # default preserved
         assert isinstance(sources[3], WebSource)
         # Untyped entries normalized.
         assert isinstance(sources[4], WebSource)

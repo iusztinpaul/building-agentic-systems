@@ -4,6 +4,7 @@ import logging
 from beanie import PydanticObjectId
 from prefect import flow, task
 
+from tree.config.app_config import app_config
 from tree.config.settings import settings
 from tree.config.sources import HuggingFaceDatasetSource
 from tree.data.batch import gather_isolated
@@ -76,11 +77,12 @@ def arxiv_window_entries(
 
 
 # --- ETL-phase BATCH steps --------------------------------------------------
-# One step per ETL phase, each operating over ONE ``batch_size``-chunk (the list
-# of raw dicts ``fetch_dataset_batches`` yields) instead of per row. This keeps a
-# window worker at a few TENS of Prefect task runs (a small constant per chunk)
-# rather than ~1000 (one per row). Only the I/O phases (enrich, load) are
-# ``@task``s; the pure transform is a plain function (ADR-002 amendment #097).
+# One step per ETL phase, each operating over ONE ``app_config.data.batch_size``
+# chunk (the list of raw dicts ``fetch_dataset_batches`` yields) instead of per
+# row. This keeps a window worker at a few TENS of Prefect task runs (a small
+# constant per chunk) rather than ~1000 (one per row). Only the I/O phases
+# (enrich, load) are ``@task``s; the pure transform is a plain function (ADR-002
+# amendment #097).
 #
 # Result persistence is OFF by default in Prefect 3.6 (the repo sets no
 # ``persist_result`` / ``result_storage`` / ``cache_policy`` and no
@@ -177,11 +179,13 @@ async def ingest_arxiv_dataset(
 ) -> list[Document]:
     """Ingest the arxiv HF dataset for ``user_id``, configured by ``entry``.
 
-    Every knob (``max_samples``, ``fetch_content``, ``batch_size``, ``concurrency``,
-    ``offset``) comes from the dispatched ``entry`` — the window the coordinator
-    already resolved from the source YAML. The flow does NOT re-read that YAML:
-    it runs in a pip-installed managed container where the repo's ``sources/``
-    dir may not be reachable, and re-reading raced the dispatched window anyway.
+    Every source knob (``max_samples``, ``fetch_content``, ``offset``) comes from
+    the dispatched ``entry`` — the window the coordinator already resolved from the
+    source YAML. The flow does NOT re-read that YAML: it runs in a pip-installed
+    managed container where the repo's ``sources/`` dir may not be reachable, and
+    re-reading raced the dispatched window anyway. Batching is app config, read
+    at call time like every other platform (task 225): ``app_config.data``'s
+    ``batch_size`` rows per streamed chunk, ``concurrency`` in-flight enrich fetches.
 
     ``entry.offset`` (#071) selects a disjoint window of the stream: the ingest
     skips the first ``offset`` rows and then streams ``max_samples`` rows — i.e.
@@ -197,9 +201,9 @@ async def ingest_arxiv_dataset(
 
     max_samples = entry.max_samples
     fetch_content = entry.fetch_content
-    batch_size = entry.batch_size
-    concurrency = entry.concurrency
     offset = entry.offset
+    batch_size = app_config.data.batch_size
+    concurrency = app_config.data.concurrency
 
     await init_mongodb(
         settings.mongo.mongo_uri.get_secret_value(),

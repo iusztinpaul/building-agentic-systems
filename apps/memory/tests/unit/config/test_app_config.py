@@ -491,8 +491,6 @@ class TestHuggingFaceWindowFields:
                 uri="librarian-bots/arxiv-metadata-snapshot",
                 max_samples=1000,
                 fetch_content=True,
-                batch_size=64,
-                concurrency=8,
                 num_workers=4,
                 offset=None,
             ),
@@ -514,8 +512,6 @@ class TestHuggingFaceWindowFields:
         assert first.uri == "librarian-bots/arxiv-metadata-snapshot"
         assert first.max_samples == 1000
         assert first.fetch_content is True
-        assert first.batch_size == 64
-        assert first.concurrency == 8
         assert first.num_workers == 4
         assert first.offset is None
 
